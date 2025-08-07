@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Load Balancer Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            background: #f8fafc; 
+            color: #334155; 
+            line-height: 1.6;
+        }
+        
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            padding: 20px;
+        }
+        
+        /* Header */
+        .header { 
+            background: white; 
+            padding: 24px 32px; 
+            border-radius: 12px; 
+            margin-bottom: 24px; 
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+        }
+        
+        .header h1 { 
+            font-size: 24px; 
+            font-weight: 600; 
+            color: #0f172a;
+        }
+        
+        .header-actions { 
+            display: flex; 
+            gap: 8px; 
+            align-items: center;
+        }
+        
+        /* Buttons */
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .btn-primary { 
+            background: #3b82f6; 
+            color: white; 
+        }
+        .btn-primary:hover { 
+            background: #2563eb; 
+            transform: translateY(-1px);
+        }
+        
+        .btn-secondary { 
+            background: #e2e8f0; 
+            color: #475569; 
+        }
+        .btn-secondary:hover { 
+            background: #cbd5e1; 
+        }
+        
+        .btn-danger { 
+            background: #ef4444; 
+            color: white; 
+        }
+        .btn-danger:hover { 
+            background: #dc2626; 
+        }
+        
+        .btn-outline { 
+            background: transparent; 
+            border: 1px solid #e2e8f0; 
+            color: #64748b; 
+        }
+        .btn-outline:hover { 
+            border-color: #3b82f6; 
+            color: #3b82f6; 
+        }
+        
+        /* Main Content */
+        .main-section { 
+            background: white; 
+            border-radius: 12px; 
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        
+        .section-header { 
+            padding: 24px 32px 16px; 
+            border-bottom: 1px solid #f1f5f9;
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+        }
+        
+        .section-title { 
+            font-size: 20px; 
+            font-weight: 600; 
+            color: #0f172a;
+        }
+        
+        /* Load Balancer Items */
+        .lb-list { 
+            padding: 0 32px 32px; 
+        }
+        
+        .lb-item { 
+            border: 1px solid #f1f5f9; 
+            border-radius: 8px; 
+            padding: 20px; 
+            margin-top: 6px;
+            margin-bottom: 6px;
+            transition: all 0.2s;
+        }
+        .lb-item:hover { 
+            border-color: #e2e8f0; 
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05); 
+        }
+        
+        .lb-header { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: flex-start; 
+            margin-bottom: 16px;
+        }
+        
+        .lb-domain { 
+            display: flex; 
+            flex-direction: column; 
+            gap: 8px;
+        }
+        
+        .domain-name { 
+            font-size: 18px; 
+            font-weight: 600; 
+            color: #0f172a;
+            display: flex; 
+            align-items: center; 
+            gap: 8px;
+        }
+        
+        .protocol-badge { 
+            font-size: 12px; 
+            font-weight: 500; 
+            padding: 4px 8px; 
+            border-radius: 6px;
+        }
+        .protocol-http { 
+            background: #fef3c7; 
+            color: #92400e; 
+        }
+        .protocol-https { 
+            background: #dcfce7; 
+            color: #166534; 
+        }
+        
+        .ssl-status { 
+            font-size: 12px; 
+            font-weight: 500; 
+            padding: 4px 8px; 
+            border-radius: 6px;
+        }
+        .ssl-active { 
+            background: #dcfce7; 
+            color: #166534; 
+        }
+        .ssl-pending { 
+            background: #fef3c7; 
+            color: #92400e; 
+        }
+        .ssl-failed { 
+            background: #fee2e2; 
+            color: #991b1b; 
+        }
+        
+        .lb-actions { 
+            display: flex; 
+            gap: 8px;
+        }
+        
+        .lb-config { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+            gap: 16px; 
+            margin-top: 12px;
+        }
+        
+        .config-item { 
+            background: #f8fafc; 
+            padding: 12px; 
+            border-radius: 6px;
+        }
+        
+        .config-label { 
+            font-size: 12px; 
+            font-weight: 500; 
+            color: #64748b; 
+            margin-bottom: 4px;
+        }
+        
+        .config-value { 
+            font-size: 14px; 
+            color: #0f172a; 
+            font-weight: 500;
+        }
+        
+        .upstream-list { 
+            display: flex; 
+            flex-wrap: wrap; 
+            gap: 8px;
+        }
+        
+        .upstream-item { 
+            background: #f1f5f9; 
+            padding: 6px 12px; 
+            border-radius: 6px; 
+            font-size: 13px; 
+            color: #475569;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .no-items { 
+            text-align: center; 
+            padding: 60px 20px; 
+            color: #64748b;
+        }
+        
+        .no-items-icon { 
+            font-size: 48px; 
+            margin-bottom: 16px; 
+            opacity: 0.5;
+        }
+        
+        /* Modal */
+        .modal { 
+            display: none; 
+            position: fixed; 
+            z-index: 1000; 
+            left: 0; 
+            top: 0; 
+            width: 100%; 
+            height: 100%; 
+            background: rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px);
+        }
+        
+        .modal-content { 
+            background: white; 
+            margin: 40px auto; 
+            padding: 0; 
+            border-radius: 12px; 
+            width: 600px; 
+            max-width: 90vw; 
+            max-height: 90vh; 
+            overflow: hidden;
+            box-shadow: 0 20px 25px rgba(0,0,0,0.15);
+        }
+        
+        .modal-header { 
+            padding: 24px 32px; 
+            border-bottom: 1px solid #f1f5f9;
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+        }
+        
+        .modal-title { 
+            font-size: 20px; 
+            font-weight: 600; 
+            color: #0f172a;
+        }
+        
+        .modal-close { 
+            background: none; 
+            border: none; 
+            font-size: 20px; 
+            color: #64748b; 
+            cursor: pointer; 
+            padding: 4px;
+            border-radius: 4px;
+        }
+        .modal-close:hover { 
+            background: #f1f5f9; 
+        }
+        
+        .modal-body { 
+            padding: 32px; 
+            max-height: 70vh; 
+            overflow-y: auto;
+        }
+        
+        /* Form */
+        .form-group { 
+            margin-bottom: 20px; 
+        }
+        
+        .form-label { 
+            display: block; 
+            margin-bottom: 8px; 
+            font-weight: 500; 
+            color: #374151; 
+            font-size: 14px;
+        }
+        
+        .form-input, .form-select, .form-textarea { 
+            width: 100%; 
+            padding: 12px; 
+            border: 1px solid #d1d5db; 
+            border-radius: 8px; 
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+        .form-input:focus, .form-select:focus, .form-textarea:focus { 
+            outline: none; 
+            border-color: #3b82f6; 
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1); 
+        }
+        
+        .form-textarea { 
+            height: 100px; 
+            resize: vertical; 
+            font-family: ui-monospace, monospace;
+        }
+        
+        .form-help { 
+            font-size: 12px; 
+            color: #6b7280; 
+            margin-top: 4px;
+        }
+        
+        .form-section { 
+            background: #f8fafc; 
+            border: 1px solid #e2e8f0; 
+            border-radius: 8px; 
+            padding: 20px; 
+            margin: 20px 0;
+        }
+        
+        .form-section-title { 
+            font-size: 16px; 
+            font-weight: 600; 
+            color: #374151; 
+            margin-bottom: 16px;
+        }
+        
+        .form-grid { 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 16px;
+        }
+        
+        .form-checkbox-group { 
+            display: flex; 
+            align-items: center; 
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        
+        .form-checkbox { 
+            width: 16px; 
+            height: 16px; 
+            accent-color: #3b82f6;
+        }
+        
+        .form-checkbox-label { 
+            font-size: 14px; 
+            color: #374151; 
+            cursor: pointer;
+        }
+        
+        .ssl-notice { 
+            background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); 
+            border: 1px solid #93c5fd; 
+            border-radius: 8px; 
+            padding: 16px; 
+            margin: 16px 0;
+        }
+        
+        .ssl-notice-title { 
+            font-weight: 600; 
+            color: #1e40af; 
+            margin-bottom: 4px;
+        }
+        
+        .ssl-notice-text { 
+            font-size: 13px; 
+            color: #1d4ed8;
+        }
+        
+        .modal-footer { 
+            padding: 24px 32px; 
+            border-top: 1px solid #f1f5f9; 
+            display: flex; 
+            gap: 12px; 
+            justify-content: flex-end;
+        }
+        
+        /* Logs Modal */
+        .logs-nav { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); 
+            gap: 8px; 
+            margin-bottom: 20px;
+        }
+        
+        .logs-content { 
+            background: #1e293b; 
+            color: #e2e8f0; 
+            border-radius: 8px; 
+            padding: 20px; 
+            font-family: ui-monospace, monospace; 
+            font-size: 12px; 
+            max-height: 400px; 
+            overflow-y: auto; 
+            white-space: pre-wrap;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container { padding: 12px; }
+            .header { padding: 20px; flex-direction: column; gap: 16px; }
+            .header-actions { width: 100%; justify-content: center; }
+            .section-header { padding: 20px 24px 12px; flex-direction: column; gap: 12px; align-items: stretch; }
+            .lb-list { padding: 0 24px 24px; }
+            .lb-header { flex-direction: column; gap: 12px; align-items: stretch; }
+            .lb-actions { justify-content: flex-end; }
+            .modal-content { margin: 20px auto; width: 95vw; }
+            .modal-body { padding: 24px; }
+            .form-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>SimpleLB - Load Balancer Dashboard</h1>
+            <div class="header-actions">
+                <button onclick="showLogs()" class="btn btn-outline">View Logs</button>
+                <button onclick="showConfig()" class="btn btn-outline">Edit Config</button>
+                <button onclick="reloadNginx()" class="btn btn-secondary">Reload</button>
+                <a href="/logout" class="btn btn-outline">Logout</a>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-section">
+            <div class="section-header">
+                <h2 class="section-title">Load Balancers</h2>
+                <button onclick="openAddModal()" class="btn btn-primary">Add Load Balancer</button>
+            </div>
+            
+            <div class="lb-list">
+                {{if .config.LoadBalancers}}
+                    {{range .config.LoadBalancers}}
+                    <div class="lb-item">
+                        <div class="lb-header">
+                            <div class="lb-domain">
+                                <div class="domain-name">
+                                    {{.Domain}}
+                                    <span class="protocol-badge {{if eq .Protocol "https"}}protocol-https{{else}}protocol-http{{end}}">
+                                        {{if eq .Protocol "https"}}HTTPS{{else}}HTTP{{end}}
+                                    </span>
+                                    {{if eq .Protocol "https"}}
+                                        {{if eq .SSLStatus "active"}}
+                                        <span class="ssl-status ssl-active">SSL Active</span>
+                                        {{else if eq .SSLStatus "requesting"}}
+                                        <span class="ssl-status ssl-pending">Requesting...</span>
+                                        {{else if eq .SSLStatus "failed"}}
+                                        <span class="ssl-status ssl-failed">SSL Failed</span>
+                                        {{else}}
+                                        <span class="ssl-status ssl-pending">SSL Pending</span>
+                                        {{end}}
+                                    {{end}}
+                                </div>
+                            </div>
+                            <div class="lb-actions">
+                                {{if and (eq .Protocol "https") (eq .SSLStatus "failed")}}
+                                <button onclick="retryCert('{{.Domain}}')" class="btn btn-outline">Retry SSL</button>
+                                {{end}}
+                                <button onclick="editLB('{{.Domain}}')" class="btn btn-outline">Edit</button>
+                                <button onclick="deleteLB('{{.Domain}}')" class="btn btn-danger">Delete</button>
+                            </div>
+                        </div>
+                        
+                        <div class="lb-config">
+                            <div class="config-item">
+                                <div class="config-label">Load Balancing</div>
+                                <div class="config-value">
+                                    {{if eq .Config.Method "round_robin"}}Round Robin{{end}}
+                                    {{if eq .Config.Method "least_conn"}}Least Connections{{end}}
+                                    {{if eq .Config.Method "ip_hash"}}IP Hash{{end}}
+                                    {{if eq .Config.Method "hash"}}Hash{{end}}
+                                    {{if .Config.SessionSticky}} + Sticky{{end}}
+                                </div>
+                            </div>
+                            
+                            {{if .Config.EnableCache}}
+                            <div class="config-item">
+                                <div class="config-label">Caching</div>
+                                <div class="config-value">{{.Config.CacheTime}}</div>
+                            </div>
+                            {{end}}
+                            
+                            <div class="config-item">
+                                <div class="config-label">Upstream Servers</div>
+                                <div class="upstream-list">
+                                    {{range .Upstreams}}
+                                    <span class="upstream-item">{{.Host}}:{{.Port}}</span>
+                                    {{end}}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {{end}}
+                {{else}}
+                    <div class="no-items">
+                        <div class="no-items-icon">⚖️</div>
+                        <h3>No Load Balancers</h3>
+                        <p>Get started by adding your first load balancer</p>
+                    </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+
+    <!-- Add/Edit Modal -->
+    <div id="lbModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modalTitle">Add Load Balancer</h3>
+                <button class="modal-close" onclick="closeLBModal()">&times;</button>
+            </div>
+            <form id="lbForm" method="post" action="/add">
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label class="form-label">Domain</label>
+                        <input type="text" name="domain" id="domainInput" class="form-input" placeholder="example.com" required>
+                        <div class="form-help">Enter the domain name that nginx should listen for</div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">Protocol</label>
+                        <select name="protocol" id="protocolSelect" class="form-select" onchange="toggleSSLFields()">
+                            <option value="http">HTTP (Port 80)</option>
+                            <option value="https">HTTPS (Port 443) - Auto SSL</option>
+                        </select>
+                        <div class="form-help">HTTPS automatically obtains SSL certificates from Let's Encrypt</div>
+                    </div>
+                    
+                    <div id="sslFields" class="ssl-notice" style="display: none;">
+                        <div class="ssl-notice-title">SSL Configuration</div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label">Email for Let's Encrypt</label>
+                            <input type="email" name="ssl_email" id="sslEmailInput" class="form-input" placeholder="your-email@example.com">
+                            <div class="form-help ssl-notice-text">Required for certificate notifications and account recovery</div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">Upstream Servers</label>
+                        <textarea name="upstreams" id="upstreamsInput" class="form-textarea" placeholder="192.168.1.100:8080&#10;192.168.1.101:8080&#10;192.168.1.102:8080" required></textarea>
+                        <div class="form-help">One server per line. Format: IP:PORT or IP:PORT:weight:max_fails:fail_timeout</div>
+                    </div>
+                    
+                    <div class="form-section">
+                        <div class="form-section-title">Advanced Configuration</div>
+                        
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label class="form-label">Load Balancing Method</label>
+                                <select name="method" id="methodSelect" class="form-select">
+                                    <option value="round_robin">Round Robin</option>
+                                    <option value="least_conn">Least Connections</option>
+                                    <option value="ip_hash">IP Hash</option>
+                                    <option value="hash">Hash (custom)</option>
+                                </select>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label class="form-label">Hash Key (for hash method)</label>
+                                <input type="text" name="hash_key" id="hashKeyInput" class="form-input" value="$remote_addr" placeholder="$remote_addr">
+                                <div class="form-help">e.g., $remote_addr, $uri, $request_uri</div>
+                            </div>
+                        </div>
+                        
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <div class="form-checkbox-group">
+                                    <input type="checkbox" name="session_sticky" id="sessionStickyInput" class="form-checkbox">
+                                    <label for="sessionStickyInput" class="form-checkbox-label">Session Persistence</label>
+                                </div>
+                                <div class="form-help">Forces same client to same server</div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <div class="form-checkbox-group">
+                                    <input type="checkbox" name="enable_cache" id="enableCacheInput" class="form-checkbox">
+                                    <label for="enableCacheInput" class="form-checkbox-label">Enable Proxy Caching</label>
+                                    <input type="text" name="cache_time" id="cacheTimeInput" class="form-input" value="1h" placeholder="1h" style="width: 70px; margin-left: 12px;">
+                                </div>
+                                <div class="form-help">Cache duration (e.g., 1h, 30m, 1d)</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="modal-footer">
+                    <button type="button" onclick="closeLBModal()" class="btn btn-outline">Cancel</button>
+                    <button type="submit" id="submitBtn" class="btn btn-primary">Add Load Balancer</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Logs Modal -->
+    <div id="logsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">System Logs</h3>
+                <button class="modal-close" onclick="closeLogsModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="logs-nav">
+                    <button onclick="showLogs('error')" class="btn btn-danger">Nginx Errors</button>
+                    <button onclick="showLogs('access')" class="btn btn-secondary">Nginx Access</button>
+                    <button onclick="showLogs('app')" class="btn btn-outline">App Errors</button>
+                    <button onclick="showLogs('letsencrypt')" class="btn btn-outline">SSL Logs</button>
+                    <button onclick="refreshLogs()" class="btn btn-outline">Refresh</button>
+                </div>
+                <div id="logsContent" class="logs-content">
+                    Click a log type above to view logs...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Config Modal -->
+    <div id="configModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">Nginx Configuration</h3>
+                <button class="modal-close" onclick="closeConfigModal()">&times;</button>
+            </div>
+            <form id="configForm" onsubmit="saveConfig(event)">
+                <div class="modal-body">
+                    <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+                        <button type="button" onclick="downloadConfig()" class="btn btn-outline">Download Backup</button>
+                        <button type="button" onclick="refreshConfig()" class="btn btn-outline">Refresh</button>
+                        <button type="button" onclick="validateConfig()" class="btn btn-outline">Validate</button>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Configuration File</label>
+                        <textarea id="configEditor" name="config" class="form-textarea" style="height: 400px; font-family: ui-monospace, monospace; font-size: 12px;" required></textarea>
+                        <div class="form-help">Direct edit of nginx configuration - Be careful with syntax!</div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" onclick="closeConfigModal()" class="btn btn-outline">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save & Validate</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let isEditMode = false;
+        let currentLogType = 'error';
+
+        function openAddModal() {
+            isEditMode = false;
+            document.getElementById('modalTitle').textContent = 'Add Load Balancer';
+            document.getElementById('submitBtn').textContent = 'Add Load Balancer';
+            document.getElementById('lbForm').action = '/add';
+            document.getElementById('lbForm').reset();
+            document.getElementById('lbModal').style.display = 'block';
+            toggleSSLFields();
+        }
+
+        function editLB(domain) {
+            isEditMode = true;
+            document.getElementById('modalTitle').textContent = 'Edit Load Balancer';
+            document.getElementById('submitBtn').textContent = 'Save Changes';
+            document.getElementById('lbForm').action = '/edit/' + encodeURIComponent(domain);
+            
+            fetch('/edit/' + encodeURIComponent(domain))
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert('Error: ' + data.error);
+                        return;
+                    }
+                    
+                    document.getElementById('domainInput').value = data.domain;
+                    document.getElementById('protocolSelect').value = data.protocol || 'http';
+                    document.getElementById('sslEmailInput').value = data.ssl_email || '';
+                    
+                    toggleSSLFields();
+                    
+                    const upstreams = data.upstreams.map(u => {
+                        let upstream = u.host + ':' + u.port;
+                        if (u.weight && u.weight !== 1) upstream += ':' + u.weight;
+                        if (u.max_fails && u.max_fails !== 3) {
+                            if (!upstream.includes(':' + u.weight)) upstream += ':1';
+                            upstream += ':' + u.max_fails;
+                        }
+                        if (u.fail_timeout && u.fail_timeout !== '10s') {
+                            if (!upstream.includes(':' + u.max_fails)) upstream += ':1:3';
+                            upstream += ':' + u.fail_timeout;
+                        }
+                        return upstream;
+                    }).join('\n');
+                    document.getElementById('upstreamsInput').value = upstreams;
+                    
+                    const config = data.config || {};
+                    document.getElementById('methodSelect').value = config.method || 'round_robin';
+                    document.getElementById('hashKeyInput').value = config.hash_key || '$remote_addr';
+                    document.getElementById('sessionStickyInput').checked = config.session_sticky || false;
+                    document.getElementById('enableCacheInput').checked = config.enable_cache || false;
+                    document.getElementById('cacheTimeInput').value = config.cache_time || '1h';
+                    
+                    document.getElementById('lbModal').style.display = 'block';
+                })
+                .catch(error => {
+                    alert('Error loading load balancer data: ' + error);
+                });
+        }
+
+        function closeLBModal() {
+            document.getElementById('lbModal').style.display = 'none';
+        }
+
+        function toggleSSLFields() {
+            const protocol = document.getElementById('protocolSelect').value;
+            const sslFields = document.getElementById('sslFields');
+            const sslEmail = document.getElementById('sslEmailInput');
+            
+            if (protocol === 'https') {
+                sslFields.style.display = 'block';
+                sslEmail.required = true;
+            } else {
+                sslFields.style.display = 'none';
+                sslEmail.required = false;
+            }
+        }
+
+        function deleteLB(domain) {
+            if (confirm('Are you sure you want to delete the load balancer for ' + domain + '?')) {
+                fetch('/delete/' + encodeURIComponent(domain), {
+                    method: 'DELETE'
+                }).then(() => {
+                    location.reload();
+                });
+            }
+        }
+
+        function reloadNginx() {
+            const button = event.target;
+            const originalText = button.innerHTML;
+            button.innerHTML = 'Reloading...';
+            button.disabled = true;
+            
+            fetch('/reload', {
+                method: 'POST'
+            }).then(response => response.json()).then(data => {
+                button.innerHTML = originalText;
+                button.disabled = false;
+                
+                if (data.status === 'reloaded') {
+                    alert('✅ ' + (data.message || 'Nginx configuration reloaded successfully!'));
+                } else {
+                    alert('❌ Error: ' + (data.error || 'Unknown error'));
+                }
+            }).catch(error => {
+                button.innerHTML = originalText;
+                button.disabled = false;
+                alert('❌ Network error: ' + error.message);
+            });
+        }
+
+        function retryCert(domain) {
+            if (!confirm('Retry SSL certificate generation for ' + domain + '?')) return;
+            
+            const button = event.target;
+            const originalText = button.innerHTML;
+            button.innerHTML = 'Retrying...';
+            button.disabled = true;
+            
+            fetch('/retry-cert/' + encodeURIComponent(domain), {
+                method: 'POST'
+            }).then(response => response.json()).then(data => {
+                button.innerHTML = originalText;
+                button.disabled = false;
+                
+                if (data.status === 'started') {
+                    alert('✅ Certificate retry started! Page will refresh to show status.');
+                    setTimeout(() => location.reload(), 2000);
+                } else {
+                    alert('❌ Error: ' + (data.error || 'Unknown error'));
+                }
+            }).catch(error => {
+                button.innerHTML = originalText;
+                button.disabled = false;
+                alert('❌ Network error: ' + error.message);
+            });
+        }
+
+        function showLogs(type = 'error') {
+            currentLogType = type;
+            document.getElementById('logsModal').style.display = 'block';
+            document.getElementById('logsContent').innerHTML = '⏳ Loading ' + type + ' logs...';
+            
+            fetch('/logs?type=' + type + '&lines=100')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.logs) {
+                        document.getElementById('logsContent').innerHTML = data.logs || 'No logs found.';
+                    } else {
+                        document.getElementById('logsContent').innerHTML = '❌ Error loading logs: ' + (data.error || 'Unknown error');
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('logsContent').innerHTML = '❌ Network error: ' + error.message;
+                });
+        }
+
+        function refreshLogs() {
+            showLogs(currentLogType);
+        }
+
+        function closeLogsModal() {
+            document.getElementById('logsModal').style.display = 'none';
+        }
+
+        function showConfig() {
+            document.getElementById('configModal').style.display = 'block';
+            document.getElementById('configEditor').value = '⏳ Loading configuration...';
+            
+            fetch('/config')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('configEditor').value = data.content;
+                })
+                .catch(error => {
+                    document.getElementById('configEditor').value = '❌ Error loading configuration: ' + error.message;
+                });
+        }
+
+        function refreshConfig() {
+            showConfig();
+        }
+
+        function downloadConfig() {
+            window.open('/config/backup', '_blank');
+        }
+
+        function validateConfig() {
+            const config = document.getElementById('configEditor').value;
+            const formData = new FormData();
+            formData.append('config', config);
+            
+            fetch('/config', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'saved') {
+                    alert('✅ Configuration is valid!\n\n' + (data.test_output || 'Syntax check passed.'));
+                } else {
+                    alert('❌ Configuration error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                alert('❌ Network error: ' + error.message);
+            });
+        }
+
+        function saveConfig(event) {
+            event.preventDefault();
+            
+            const button = event.target.querySelector('button[type="submit"]');
+            const originalText = button.innerHTML;
+            button.innerHTML = 'Saving...';
+            button.disabled = true;
+            
+            const formData = new FormData(event.target);
+            
+            fetch('/config', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                button.innerHTML = originalText;
+                button.disabled = false;
+                
+                if (data.status === 'saved') {
+                    alert('✅ ' + (data.message || 'Configuration saved successfully!'));
+                    closeConfigModal();
+                } else {
+                    alert('❌ Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                button.innerHTML = originalText;
+                button.disabled = false;
+                alert('❌ Network error: ' + error.message);
+            });
+        }
+
+        function closeConfigModal() {
+            document.getElementById('configModal').style.display = 'none';
+        }
+
+        // Close modals when clicking outside
+        window.onclick = function(event) {
+            const modals = ['lbModal', 'logsModal', 'configModal'];
+            modals.forEach(modalId => {
+                const modal = document.getElementById(modalId);
+                if (event.target === modal) {
+                    modal.style.display = 'none';
+                }
+            });
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+services:
+  simplelb:
+    build: .
+    ports:
+      - "80:80"
+      - "443:443"
+      - "81:81"
+    environment:
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=password
+      - NGINX_PORT=80
+      - MANAGEMENT_PORT=81
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
