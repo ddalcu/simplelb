@@ -61,7 +61,7 @@ services:
     ports:
       - "80:80"    # HTTP traffic
       - "443:443"  # HTTPS traffic  
-      - "8080:81"  # Management UI (8080 within container 81 exposed on host)
+      - "8080:81"  # Management UI
     environment:
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=your-secure-password

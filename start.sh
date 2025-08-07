@@ -6,6 +6,12 @@ mkdir -p /var/log/management-ui
 mkdir -p /etc/nginx/conf.d
 mkdir -p /app
 
+# Create unified data directory structure
+mkdir -p /app/data/nginx
+mkdir -p /app/data/logs
+mkdir -p /app/data/letsencrypt
+mkdir -p /app/data/certbot
+
 cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
 
 export NGINX_PORT=${NGINX_PORT:-80}
