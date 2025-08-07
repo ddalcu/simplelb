@@ -1,53 +1,69 @@
-# 🚀 SimpleLB - Nginx Load Balancer with Let's Encrypt
+# 🏠 SimpleLB - Simple Load Balancer for Home Labs
 
-A lightweight, Docker-based nginx load balancer with a clean web UI for managing multiple sites, featuring automatic SSL certificate generation via Let's Encrypt.
+A lightweight, Docker-based load balancer built with **Caddy** and **Go**, featuring automatic SSL certificates and a clean web interface. Perfect for home labs and small deployments.
 
-[![Docker Build](https://github.com/ddalcu/simplelb/actions/workflows/docker-build.yml/badge.svg)](https://github.com/ddalcu/simplelb/actions/workflows/docker-build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
+
+## 🚀 Quick Start
+
+### Docker Compose (Recommended)
+```yaml
+services:
+  simplelb:
+    image: ghcr.io/ddalcu/simplelb:latest
+    ports:
+      - "80:80"    # HTTP
+      - "443:443"  # HTTPS
+      - "81:81"    # Management UI
+    environment:
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=your-secure-password
+      - ACME_EMAIL=your-email@example.com
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+```
+
+### Docker One-liner
+```bash
+docker run -d --name simplelb -p 80:80 -p 443:443 -p 81:81 -v $(pwd)/data:/app/data -e ADMIN_USERNAME=admin -e ADMIN_PASSWORD=your-secure-password -e ACME_EMAIL=your-email@example.com ghcr.io/ddalcu/simplelb:latest
+```
+
+**Then visit:** https://localhost:81 (accept the self-signed certificate warning)
 
 ## ✨ Features
 
 ### 🔧 **Load Balancing**
-- **Multiple Algorithms**: Round-robin, least connections, IP hash, custom hash
-- **Health Checking**: Configurable max_fails and fail_timeout per server
-- **Server Weights**: Distribute traffic based on server capacity (1-100)
-- **Session Persistence**: Sticky sessions using IP hash
+- Multiple algorithms: Random, Round Robin, Least Connections, First Available, IP Hash, Header Hash, Cookie Hash
+- Real-time configuration updates via Caddy's admin API
+- Persistent configuration across restarts
 
-### 🔒 **SSL/HTTPS Support**
-- **Automatic Let's Encrypt**: Zero-config SSL certificate generation
-- **Certificate Management**: Automatic renewal every 60 days
-- **Retry Functionality**: Manual certificate retry for failed attempts
-- **HTTP → HTTPS Redirect**: Automatic traffic redirection
-
-### 🎯 **Advanced Features**
-- **Proxy Caching**: Configurable response caching with custom durations
-- **Protocol Support**: HTTP and HTTPS with automatic certificate handling
-- **Real-time Monitoring**: Live SSL certificate status tracking
-- **Configuration Backup**: Download and restore nginx configurations
+### 🔒 **Automatic HTTPS**
+- Let's Encrypt integration with automatic certificate provisioning
+- Background certificate renewal
+- HTTP → HTTPS redirects
+- Multi-domain support
 
 ### 🖥️ **Web Interface**
-- **Clean UI**: Intuitive dashboard for managing load balancers
-- **Real-time Status**: Visual SSL certificate status indicators
-- **Comprehensive Logs**: View nginx, application, and Let's Encrypt logs
-- **Advanced Configuration**: Granular control over all load balancing options
+- Clean, responsive dashboard
+- Easy load balancer management
+- Real-time log viewing
+- No CLI required
 
 ## 📸 Screenshots
 
 ### Dashboard Overview
 ![SimpleLB Dashboard](screenshots/dashboard.png)
-*Main dashboard showing load balancers with real-time SSL status and configuration details*
+*Simple dashboard for managing your load balancers*
 
-### Add Load Balancer Modal
+### Add Load Balancer
 ![Add Load Balancer](screenshots/addlb.png)
-*Clean, modern interface for adding new load balancers with advanced configuration options*
+*Easy form to add new load balancers*
 
-### System Logs Viewer
+### System Logs
 ![System Logs](screenshots/logs.png)
-*Comprehensive log viewer for nginx, application, and Let's Encrypt certificate logs*
-
-### Nginx Configuration Editor
-![Nginx Config Editor](screenshots/nginxconfig.png)
-*Direct nginx configuration editing with validation and backup capabilities*
+*View application and Caddy logs in real-time*
 
 ## 🚀 Quick Start
 
@@ -56,17 +72,28 @@ A lightweight, Docker-based nginx load balancer with a clean web UI for managing
 1. **Create docker-compose.yml**:
 ```yaml
 services:
-  nginx-loadbalancer:
-    image: ghcr.io/ddalcu/simplelb:latest
+  caddy-lb:
+    build: .
     ports:
-      - "80:80"    # HTTP traffic
-      - "443:443"  # HTTPS traffic  
-      - "8080:81"  # Management UI
+      - "80:80"          # HTTP traffic
+      - "443:443"        # HTTPS traffic
+      - "81:81"          # Management web interface
+      - "2019:2019"      # Caddy Admin API
     environment:
+      # Management Interface Authentication
       - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=your-secure-password
-      - NGINX_PORT=80
+      - ADMIN_PASSWORD=password
       - MANAGEMENT_PORT=81
+      
+      # Security Configuration
+      - SESSION_SECRET=your-super-secret-session-key-change-this-in-production
+      - SESSION_COOKIE_SECURE=0       # Set to 1 for HTTPS in production
+      
+      # SSL/TLS Configuration
+      - ACME_EMAIL=admin@example.com  # Email for Let's Encrypt certificates
+      
+      # Caddy Integration
+      - CADDY_ADMIN_URL=http://127.0.0.1:2019  # Caddy Admin API URL
     volumes:
       - ./data:/app/data
     restart: unless-stopped
@@ -78,66 +105,68 @@ docker-compose up -d
 ```
 
 3. **Access the web interface**:
-   - Open http://localhost:8080
+   - Open https://localhost:81 (accept the self-signed certificate warning)
    - Login with your configured credentials
-   - Start adding load balancers!
+   - Start creating load balancers!
 
-### Using Docker Run
+   **Note**: The management interface uses HTTPS with a self-signed certificate for security. Your browser will show a security warning - this is normal for self-signed certificates.
+
+### Using Docker Build
 
 ```bash
-docker run -d \
-  --name simplelb \
-  -p 80:80 -p 443:443 -p 8080:81 \
-  -e ADMIN_USERNAME=admin \
-  -e ADMIN_PASSWORD=your-secure-password \
-  -v $(pwd)/data:/app/data \
-  ghcr.io/ddalcu/simplelb:latest
+# Clone the repo
+git clone <your-repo-url>
+
+# Build and run
+docker-compose up --build -d
 ```
 
-## 📋 Usage Guide
+### One-liner Docker Command
+
+```bash
+# Build and run with Docker (without compose)
+docker build -t simplelb . && docker run -d --name simplelb -p 80:80 -p 443:443 -p 81:81 -p 2019:2019 -v $(pwd)/data:/app/data -e ADMIN_USERNAME=admin -e ADMIN_PASSWORD=password -e ACME_EMAIL=admin@example.com simplelb
+```
+
+## 📋 How to Use
 
 ### Creating Load Balancers
 
-1. **Access Management UI**: Navigate to http://your-server:8080
-2. **Add Load Balancer**: Click "Add Load Balancer" 
-3. **Configure Settings**:
-   - **Domain**: Enter your domain (e.g., `example.com`)
-   - **Protocol**: Choose HTTP or HTTPS
-   - **SSL Email**: Required for HTTPS (Let's Encrypt notifications)
-   - **Upstream Servers**: List your backend servers
-   - **Advanced Options**: Configure load balancing method, caching, etc.
+1. **Access Management UI**: Navigate to https://your-server:81
+2. **Login**: Use your configured username/password (accept self-signed certificate warning)
+3. **Add Load Balancer**: Click "Add Load Balancer" 
+4. **Configure Settings**:
+   - **Domain**: Enter your domain (e.g., `api.homelab.local`)
+   - **Backend Servers**: Add your upstream servers (one per line)
+   - **Load Balancing Method**: Choose your preferred algorithm
+   - **Hash Key**: For header/cookie-based load balancing (if applicable)
 
-### Upstream Server Format
+### Backend Server Format
 
-Basic format: `IP:PORT`
+Simple format - one server per line:
 ```
 192.168.1.100:8080
-192.168.1.101:8080
+192.168.1.101:8080  
 192.168.1.102:8080
-```
-
-Advanced format: `IP:PORT:weight:max_fails:fail_timeout`
-```
-192.168.1.100:8080:3:5:15s
-192.168.1.101:8080:1:3:10s
-192.168.1.102:8080:2:3:10s
 ```
 
 ### Load Balancing Methods
 
-- **Round Robin** (default): Distributes requests evenly across servers
-- **Least Connections**: Routes to server with fewest active connections
-- **IP Hash**: Routes based on client IP (enables session persistence)
-- **Hash**: Routes based on custom variables (`$uri`, `$remote_addr`, etc.)
+- **Random** (default): Randomly distribute requests
+- **Round Robin**: Even distribution across all servers
+- **Least Connections**: Routes to server with fewest active connections  
+- **First Available**: Always use the first healthy server
+- **IP Hash**: Client IP-based routing (session persistence)
+- **Header Hash**: Route based on HTTP header value
+- **Cookie Hash**: Route based on cookie value
 
-### SSL Certificate Management
+### SSL/HTTPS Setup
 
-For HTTPS load balancers:
-1. **Domain DNS**: Ensure your domain points to this server's IP
-2. **Email Required**: Provide valid email for Let's Encrypt notifications
-3. **Automatic Generation**: Certificates are requested automatically
-4. **Monitor Status**: Check certificate status in the dashboard
-5. **Manual Retry**: Use "Retry SSL" button for failed certificates
+For automatic HTTPS:
+1. **Domain DNS**: Point your domain to this server's IP
+2. **Email Required**: Set `ACME_EMAIL` for Let's Encrypt notifications
+3. **Port 443**: Make sure port 443 is accessible from the internet
+4. **Wait**: Certificates are provisioned automatically
 
 ## 🔧 Configuration
 
@@ -147,102 +176,259 @@ For HTTPS load balancers:
 |----------|---------|-------------|
 | `ADMIN_USERNAME` | `admin` | Web interface username |
 | `ADMIN_PASSWORD` | `password` | Web interface password |
-| `NGINX_PORT` | `80` | HTTP port for load balanced traffic |
 | `MANAGEMENT_PORT` | `81` | Web interface port |
+| `SESSION_SECRET` | *default* | Session encryption key |
+| `SESSION_COOKIE_SECURE` | `0` | Set to `1` for HTTPS |
+| `ACME_EMAIL` | `admin@example.com` | Let's Encrypt email |
+| `CADDY_ADMIN_URL` | `http://127.0.0.1:2019` | Caddy Admin API |
 
-### Volume Mounts
+Copy `.env.example` to `.env` and customize for your setup.
 
-| Path | Purpose |
-|------|---------|
-| `/app/data` | Unified data directory (nginx configs, SSL certificates, logs) |
+### Data Persistence
 
-## 📊 Monitoring & Logs
-
-The web interface provides comprehensive logging:
-
-### 🌐 **Nginx Logs**
-- **Error Logs**: nginx server errors and warnings
-- **Access Logs**: HTTP request logs and access patterns
-
-### ⚙️ **Application Logs**  
-- **App Errors**: Go backend errors and certificate generation
-- **App Access**: HTTP API requests and debugging info
-
-### 🔒 **Let's Encrypt Logs**
-- **Certificate Logs**: Complete certbot execution logs
-- **ACME Challenges**: Domain validation and certificate issuance
-
-## 🏗️ Architecture
-
-```
-┌─────────────────┐    ┌─────────────────┐
-│   Internet      │    │  Management UI  │
-│   Traffic       │    │   (Port 81)     │
-└─────────┬───────┘    └─────────────────┘
-          │                      │
-┌─────────▼───────┐              │
-│     Nginx       │              │
-│  (Ports 80/443) │              │
-│                 │              │
-│  Load Balancer  │◄─────────────┘
-│  SSL Termination│
-└─────────┬───────┘
-          │
-┌─────────▼───────┐
-│   Upstream      │
-│    Servers      │
-│                 │
-│ 192.168.1.100:8080
-│ 192.168.1.101:8080
-│ 192.168.1.102:8080
-└─────────────────┘
-```
-
-### 📁 **Data Directory Structure**
-
-All application data is stored in a single unified directory `/app/data`:
-
-```
-data/
-├── nginx/                  # Nginx configuration files
-│   └── loadbalancer.conf   # Generated load balancer config
-├── letsencrypt/            # SSL certificates & Let's Encrypt data
-│   ├── live/              # Active certificates
-│   ├── archive/           # Certificate archive
-│   └── renewal/           # Auto-renewal configs
-├── certbot/               # ACME challenge files
-└── logs/                  # All application logs
-    ├── nginx-access.log   # Nginx access logs
-    ├── nginx-error.log    # Nginx error logs
-    ├── app-access.log     # Application logs
-    ├── app-error.log      # Application errors
-    └── letsencrypt.log    # Certificate generation logs
-```
-
-This unified structure makes it easy to:
-- **Backup**: Single directory contains all persistent data
-- **Deploy**: Mount one volume for complete data persistence  
-- **Debug**: All logs centralized in one location
+All data is stored in `/app/data`:
+- **Configuration**: Saved automatically and restored on restart
+- **SSL Certificates**: Stored in `/app/data/caddy/data/`
+- **Logs**: Application and Caddy logs in `/app/data/logs/`
+- **Management TLS**: Self-signed certificates in `/app/data/certs/`
 
 ## 🔒 Security Features
 
-- **Authentication**: Secure web interface with session management
-- **SSL/TLS**: Automatic HTTPS with modern TLS protocols (1.2, 1.3)
-- **Security Headers**: HSTS, secure cipher suites, OCSP stapling
-- **Certificate Validation**: Automatic Let's Encrypt domain validation
-- **Configuration Validation**: nginx config testing before reload
+### Management Interface Security
+- **HTTPS Only**: Management interface runs on HTTPS with TLS 1.2+
+- **Self-Signed Certificates**: Auto-generated certificates for secure communication
+- **Secure Session Cookies**: HTTP-only, secure session management
+- **Basic Authentication**: Username/password protection for all endpoints
+
+### TLS Configuration
+- **Strong Ciphers**: Modern cipher suites (ECDHE, ChaCha20-Poly1305, AES-GCM)
+- **Certificate Validation**: Automatic certificate expiry checking and renewal
+- **Secure Headers**: Security headers applied to all responses
+
+### Network Security
+- **Isolated Management**: Management interface separate from load balancing traffic
+- **Encrypted Communication**: All admin communication encrypted via HTTPS
+
+## 🏗️ Architecture
+
+### System Overview
+```mermaid
+graph TD
+    A[Internet Traffic] --> B[Caddy Load Balancer<br/>Ports 80/443]
+    B --> C[Backend Server 1<br/>192.168.1.100:8080]
+    B --> D[Backend Server 2<br/>192.168.1.101:8080]
+    B --> E[Backend Server N<br/>192.168.1.10x:8080]
+    
+    F[Management UI<br/>Port 81] --> G[SimpleLB App<br/>Go Application]
+    G --> H[Caddy Admin API<br/>Port 2019]
+    H --> B
+    
+    I[Let's Encrypt] --> B
+    B --> J[SSL Certificates<br/>/app/data/caddy/data]
+    G --> K[Configuration<br/>/app/data/caddy/config]
+```
+
+### Request Flow
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant LB as Caddy Load Balancer
+    participant B1 as Backend 1
+    participant B2 as Backend 2
+    participant LE as Let's Encrypt
+    
+    Note over C,LE: HTTPS Setup (First Time)
+    C->>LB: HTTP Request to domain.com
+    LB->>LE: Request SSL Certificate
+    LE->>LB: Return Certificate
+    LB->>C: Redirect to HTTPS
+    
+    Note over C,B2: Normal Request Flow
+    C->>LB: HTTPS Request
+    LB->>LB: Terminate SSL
+    LB->>LB: Apply Load Balancing Algorithm
+    alt Round Robin
+        LB->>B1: Forward Request
+        B1->>LB: Response
+    else Next in rotation
+        LB->>B2: Forward Request
+        B2->>LB: Response
+    end
+    LB->>C: Return Response (SSL)
+```
+
+### Configuration Management
+```mermaid
+graph LR
+    A[Web UI] --> B[Go Application]
+    B --> C[Caddy Admin API]
+    C --> D[Update Caddy Config]
+    D --> E[Save to /app/data/caddy/config/caddy.json]
+    
+    F[Container Restart] --> G[Load Saved Config]
+    G --> C
+    
+    H[Let's Encrypt] --> I[Store Certificates]
+    I --> J[/app/data/caddy/data/]
+```
+
+## 📁 Directory Structure
+
+```
+/app/data/
+├── logs/
+│   ├── caddy/          # Caddy access/error logs
+│   ├── simplelb/        # Application logs
+│   └── supervisor/     # Process management logs
+├── caddy/
+│   ├── data/          # SSL certificates, TLS data
+│   └── config/        # Configuration snapshots
+└── certs/             # Management interface TLS certificates
+    ├── server.crt     # Self-signed certificate
+    └── server.key     # Private key
+```
+
+## 🔌 API Documentation
+
+SimpleLB provides a REST API for programmatic management of load balancers.
+
+### Authentication
+All API endpoints require HTTP Basic Authentication using your configured admin credentials.
+
+```bash
+curl -k -u admin:password https://localhost:81/dashboard
+```
+
+**Note**: Use the `-k` flag to accept the self-signed certificate.
+
+### Endpoints
+
+#### Get All Load Balancers
+```http
+GET /dashboard
+```
+**Description**: Returns the dashboard page with all load balancers
+**Response**: HTML page with load balancer list
+
+#### Get Load Balancer Details
+```http
+GET /edit/:domain
+```
+**Description**: Get configuration for a specific load balancer
+**Parameters**:
+- `domain` (path): Domain name of the load balancer
+
+**Response**:
+```json
+{
+  "domain": "api.homelab.local",
+  "method": "round_robin",
+  "backends": "192.168.1.100:8080\n192.168.1.101:8080"
+}
+```
+
+#### Create Load Balancer
+```http
+POST /add
+```
+**Description**: Create a new load balancer
+**Content-Type**: `application/x-www-form-urlencoded`
+
+**Parameters**:
+- `domain` (string): Domain name (e.g., "api.homelab.local")
+- `backends` (string): Backend servers, one per line
+- `method` (string): Load balancing method ("random", "round_robin", "least_conn", "first", "ip_hash", "header", "cookie")
+- `hash_key` (string): Hash key for header/cookie methods (optional)
+
+**Example**:
+```bash
+curl -k -X POST -u admin:password \
+  -d "domain=api.homelab.local" \
+  -d "backends=192.168.1.100:8080\n192.168.1.101:8080" \
+  -d "method=round_robin" \
+  https://localhost:81/add
+```
+
+#### Update Load Balancer
+```http
+POST /edit/:domain
+```
+**Description**: Update existing load balancer configuration
+**Parameters**: Same as create, plus:
+- `domain` (path): Existing domain name
+
+#### Delete Load Balancer
+```http
+POST /delete/:domain
+```
+**Description**: Delete a load balancer
+**Parameters**:
+- `domain` (path): Domain name to delete
+
+**Example**:
+```bash
+curl -k -X POST -u admin:password \
+  https://localhost:81/delete/api.homelab.local
+```
+
+#### View Logs
+```http
+GET /logs?type=<log_type>
+```
+**Description**: View system logs
+**Parameters**:
+- `type` (query): Log type ("app", "caddy", "caddy-error")
+
+### Load Balancing Methods
+
+| Method | Description | Hash Key Required |
+|--------|-------------|------------------|
+| `random` | Random distribution (default) | No |
+| `round_robin` | Even distribution across servers | No |
+| `least_conn` | Route to server with fewest connections | No |
+| `first` | Always use first healthy server | No |
+| `ip_hash` | Route based on client IP | No |
+| `header` | Route based on HTTP header | Yes |
+| `cookie` | Route based on cookie value | Yes |
+
+### Hash Key Options
+For `header` and `cookie` methods:
+
+**Header Options**:
+- `X-Forwarded-For`
+- `X-Real-IP`
+- `X-User-ID`
+- `Authorization`
+
+**Cookie Options**:
+- `session_id`
+- `user_session`
+
+## 🔍 Monitoring
+
+### Web Interface Logs
+- **Application Logs**: View SimpleLB application logs
+- **Caddy Access Logs**: See incoming HTTP requests
+- **Caddy Error Logs**: Troubleshoot Caddy issues
+
+### Command Line
+```bash
+# View all logs
+docker-compose logs -f
+
+# View specific service logs
+docker-compose logs -f caddy-lb
+
+# Check configuration
+curl http://localhost:2019/config/
+```
 
 ## 🛠️ Development
 
-### Prerequisites
-- Docker & Docker Compose
-- Go 1.21+ (for local development)
-
-### Local Development
+### Local Setup
 ```bash
 # Clone repository
-git clone https://github.com/ddalcu/simplelb.git
-cd simplelb
+git clone <your-repo>
 
 # Build and run
 docker-compose up --build
@@ -254,48 +440,61 @@ docker-compose logs -f
 ### Project Structure
 ```
 .
-├── main.go                 # Go backend application
-├── templates/              # HTML templates
-│   └── dashboard.html      # Web interface
-├── Dockerfile             # Container definition
-├── docker-compose.yml     # Service configuration
+├── main.go                 # Go application
+├── templates/              # HTML templates  
+│   ├── dashboard.html      # Main interface
+│   ├── login.html          # Login page
+│   └── logs.html          # Log viewer
+├── Dockerfile             # Container build
+├── docker-compose.yml     # Service definition
 ├── supervisord.conf       # Process management
-├── start.sh              # Container startup script
-└── nginx.conf.template   # Base nginx configuration
+├── start.sh              # Startup script
+├── logrotate.sh          # Log rotation
+├── Caddyfile             # Caddy configuration
+└── .env.example          # Environment template
 ```
 
-## 🤝 Contributing
+## 🐛 Troubleshooting
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+### Common Issues
 
-### Development Setup
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
+**SSL Certificates not working?**
+- Check DNS points to your server
+- Verify port 443 is accessible
+- Check `ACME_EMAIL` is set
+- Look at Caddy error logs
+
+**Load balancer not responding?**
+- Verify backend servers are reachable
+- Check backend server health
+- Review Caddy access logs
+
+**Web interface not accessible?**
+- Check port 81 is accessible
+- Verify Docker container is running
+- Check application logs
+
+### Getting Help
+- Check the logs in the web interface
+- Use `docker-compose logs -f` for detailed logs
+- Verify your configuration in the web UI
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🆘 Support
+## 🤝 Contributing
 
-- **Documentation**: Check this README and inline help
-- **Issues**: [GitHub Issues](https://github.com/ddalcu/simplelb/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/ddalcu/simplelb/discussions)
+Feel free to:
+- Report bugs
+- Suggest features  
+- Submit pull requests
+- Improve documentation
 
-## 🎯 Roadmap
-
-- [ ] Multi-domain SSL certificates (SAN)
-- [ ] Metrics and Prometheus integration
-- [ ] API-only mode (headless operation)
-- [ ] Kubernetes deployment manifests
-- [ ] Advanced routing rules (path-based, header-based)
-- [ ] Load balancer templates and presets
+This is a hobby project, so be patient with responses!
 
 ---
 
-**Made with ❤️ for the open source community**
+**Perfect for home labs, development environments, and small deployments** 🏠
 
-*Secure, scalable, and simple load balancing for everyone.*
+*Simple load balancing without the complexity*

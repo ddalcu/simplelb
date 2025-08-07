@@ -6,36 +6,29 @@ RUN go mod download
 
 COPY . .
 RUN go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o main .
 
-FROM nginx:alpine
+FROM caddy:2-alpine
 
-RUN apk add --no-cache supervisor openssl certbot certbot-nginx
+RUN apk add --no-cache supervisor
 
 COPY --from=builder /app/main /usr/local/bin/
 COPY --from=builder /app/templates /app/templates
-COPY nginx.conf.template /etc/nginx/
+COPY Caddyfile /etc/caddy/Caddyfile
 COPY supervisord.conf /etc/supervisor/conf.d/
 COPY start.sh /
+COPY logrotate.sh /usr/local/bin/
 
-RUN chmod +x /start.sh /usr/local/bin/main
-
-# Generate dummy SSL certificates for development
-RUN mkdir -p /etc/nginx/ssl && \
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-    -keyout /etc/nginx/ssl/dummy.key \
-    -out /etc/nginx/ssl/dummy.crt \
-    -subj "/C=US/ST=Local/L=Local/O=LoadBalancer/CN=localhost"
+RUN chmod +x /start.sh /usr/local/bin/main /usr/local/bin/logrotate.sh
 
 # Create unified data directory structure
-RUN mkdir -p /app/data/nginx \
-    /app/data/logs \
-    /app/data/letsencrypt \
-    /app/data/certbot
+RUN mkdir -p /app/data/logs/caddy \
+    /app/data/logs/simplelb \
+    /app/data/logs/supervisor \
+    /app/data/caddy/data \
+    /app/data/caddy/config \
+    /app/data/certs
 
-# Set up certificate renewal cron job with unified paths
-RUN echo '0 0,12 * * * LETSENCRYPT_DIR=/app/data/letsencrypt /usr/bin/certbot renew --quiet --config-dir /app/data/letsencrypt --work-dir /app/data/letsencrypt --logs-dir /app/data/logs --post-hook "nginx -s reload"' | crontab -
-
-EXPOSE 80 443 81
+EXPOSE 80 443 81 2019
 
 CMD ["/start.sh"]

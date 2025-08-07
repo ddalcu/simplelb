@@ -1,446 +1,460 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Load Balancer Dashboard</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SimpleLB - Dashboard</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
-            background: #f8fafc; 
-            color: #334155; 
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
+            --secondary: #64748b;
+            --success: #059669;
+            --danger: #dc2626;
+            --warning: #d97706;
+            --light: #f8fafc;
+            --dark: #0f172a;
+            --border: #e2e8f0;
+            --radius: 8px;
+            --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            --shadow-lg: 0 20px 25px -5px rgb(0 0 0 / 0.1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, var(--light) 0%, #e2e8f0 100%);
+            min-height: 100vh;
+            color: var(--dark);
             line-height: 1.6;
         }
-        
-        .container { 
-            max-width: 1200px; 
-            margin: 0 auto; 
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
             padding: 20px;
         }
-        
+
         /* Header */
-        .header { 
-            background: white; 
-            padding: 24px 32px; 
-            border-radius: 12px; 
-            margin-bottom: 24px; 
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-            display: flex; 
-            justify-content: space-between; 
+        .header {
+            background: white;
+            padding: 2rem;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
             align-items: center;
         }
-        
-        .header h1 { 
-            font-size: 24px; 
-            font-weight: 600; 
-            color: #0f172a;
+
+        .header-brand {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
         }
-        
-        .header-actions { 
-            display: flex; 
-            gap: 8px; 
+
+        .header h1 {
+            color: var(--primary);
+            font-size: 2rem;
+            font-weight: 700;
+        }
+
+        .header-tagline {
+            color: var(--secondary);
+            font-size: 0.9rem;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 0.75rem;
             align-items: center;
         }
-        
+
         /* Buttons */
         .btn {
-            padding: 8px 16px;
+            padding: 0.75rem 1.5rem;
             border: none;
-            border-radius: 8px;
-            font-size: 14px;
+            border-radius: var(--radius);
+            font-size: 0.9rem;
             font-weight: 500;
             cursor: pointer;
             transition: all 0.2s;
             text-decoration: none;
             display: inline-flex;
             align-items: center;
-            gap: 6px;
+            gap: 0.5rem;
+            line-height: 1;
         }
-        
-        .btn-primary { 
-            background: #3b82f6; 
-            color: white; 
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
         }
-        .btn-primary:hover { 
-            background: #2563eb; 
+        .btn-primary:hover {
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow);
+        }
+
+        .btn-success {
+            background: var(--success);
+            color: white;
+        }
+        .btn-success:hover {
+            background: #047857;
             transform: translateY(-1px);
         }
-        
-        .btn-secondary { 
-            background: #e2e8f0; 
-            color: #475569; 
+
+        .btn-danger {
+            background: var(--danger);
+            color: white;
         }
-        .btn-secondary:hover { 
-            background: #cbd5e1; 
+        .btn-danger:hover {
+            background: #b91c1c;
         }
-        
-        .btn-danger { 
-            background: #ef4444; 
-            color: white; 
+
+        .btn-outline {
+            background: white;
+            border: 1px solid var(--border);
+            color: var(--secondary);
         }
-        .btn-danger:hover { 
-            background: #dc2626; 
+        .btn-outline:hover {
+            border-color: var(--primary);
+            color: var(--primary);
         }
-        
-        .btn-outline { 
-            background: transparent; 
-            border: 1px solid #e2e8f0; 
-            color: #64748b; 
-        }
-        .btn-outline:hover { 
-            border-color: #3b82f6; 
-            color: #3b82f6; 
-        }
-        
+
         /* Main Content */
-        .main-section { 
-            background: white; 
-            border-radius: 12px; 
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        .main-card {
+            background: white;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
         }
-        
-        .section-header { 
-            padding: 24px 32px 16px; 
-            border-bottom: 1px solid #f1f5f9;
-            display: flex; 
-            justify-content: space-between; 
+
+        .card-header {
+            padding: 2rem 2rem 1rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
             align-items: center;
         }
-        
-        .section-title { 
-            font-size: 20px; 
-            font-weight: 600; 
-            color: #0f172a;
+
+        .card-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--dark);
         }
-        
-        /* Load Balancer Items */
-        .lb-list { 
-            padding: 0 32px 32px; 
+
+        /* Load Balancer List */
+        .lb-list {
+            padding: 2rem;
         }
-        
-        .lb-item { 
-            border: 1px solid #f1f5f9; 
-            border-radius: 8px; 
-            padding: 20px; 
-            margin-top: 6px;
-            margin-bottom: 6px;
+
+        .lb-item {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            margin-bottom: 1rem;
             transition: all 0.2s;
         }
-        .lb-item:hover { 
-            border-color: #e2e8f0; 
-            box-shadow: 0 4px 6px rgba(0,0,0,0.05); 
+        .lb-item:hover {
+            border-color: var(--primary);
+            box-shadow: var(--shadow);
         }
-        
-        .lb-header { 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: flex-start; 
-            margin-bottom: 16px;
+
+        .lb-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
         }
-        
-        .lb-domain { 
-            display: flex; 
-            flex-direction: column; 
-            gap: 8px;
+
+        .lb-info {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
         }
-        
-        .domain-name { 
-            font-size: 18px; 
-            font-weight: 600; 
-            color: #0f172a;
-            display: flex; 
-            align-items: center; 
-            gap: 8px;
-        }
-        
-        .protocol-badge { 
-            font-size: 12px; 
-            font-weight: 500; 
-            padding: 4px 8px; 
-            border-radius: 6px;
-        }
-        .protocol-http { 
-            background: #fef3c7; 
-            color: #92400e; 
-        }
-        .protocol-https { 
-            background: #dcfce7; 
-            color: #166534; 
-        }
-        
-        .ssl-status { 
-            font-size: 12px; 
-            font-weight: 500; 
-            padding: 4px 8px; 
-            border-radius: 6px;
-        }
-        .ssl-active { 
-            background: #dcfce7; 
-            color: #166534; 
-        }
-        .ssl-pending { 
-            background: #fef3c7; 
-            color: #92400e; 
-        }
-        .ssl-failed { 
-            background: #fee2e2; 
-            color: #991b1b; 
-        }
-        
-        .lb-actions { 
-            display: flex; 
-            gap: 8px;
-        }
-        
-        .lb-config { 
-            display: grid; 
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
-            gap: 16px; 
-            margin-top: 12px;
-        }
-        
-        .config-item { 
-            background: #f8fafc; 
-            padding: 12px; 
-            border-radius: 6px;
-        }
-        
-        .config-label { 
-            font-size: 12px; 
-            font-weight: 500; 
-            color: #64748b; 
-            margin-bottom: 4px;
-        }
-        
-        .config-value { 
-            font-size: 14px; 
-            color: #0f172a; 
-            font-weight: 500;
-        }
-        
-        .upstream-list { 
-            display: flex; 
-            flex-wrap: wrap; 
-            gap: 8px;
-        }
-        
-        .upstream-item { 
-            background: #f1f5f9; 
-            padding: 6px 12px; 
-            border-radius: 6px; 
-            font-size: 13px; 
-            color: #475569;
-            border: 1px solid #e2e8f0;
-        }
-        
-        .no-items { 
-            text-align: center; 
-            padding: 60px 20px; 
-            color: #64748b;
-        }
-        
-        .no-items-icon { 
-            font-size: 48px; 
-            margin-bottom: 16px; 
-            opacity: 0.5;
-        }
-        
-        /* Modal */
-        .modal { 
-            display: none; 
-            position: fixed; 
-            z-index: 1000; 
-            left: 0; 
-            top: 0; 
-            width: 100%; 
-            height: 100%; 
-            background: rgba(0,0,0,0.5);
-            backdrop-filter: blur(4px);
-        }
-        
-        .modal-content { 
-            background: white; 
-            margin: 40px auto; 
-            padding: 0; 
-            border-radius: 12px; 
-            width: 600px; 
-            max-width: 90vw; 
-            max-height: 90vh; 
-            overflow: hidden;
-            box-shadow: 0 20px 25px rgba(0,0,0,0.15);
-        }
-        
-        .modal-header { 
-            padding: 24px 32px; 
-            border-bottom: 1px solid #f1f5f9;
-            display: flex; 
-            justify-content: space-between; 
+
+        .domain-name {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--dark);
+            display: flex;
             align-items: center;
+            gap: 0.75rem;
         }
-        
-        .modal-title { 
-            font-size: 20px; 
-            font-weight: 600; 
-            color: #0f172a;
+
+        .badge {
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            text-transform: uppercase;
         }
-        
-        .modal-close { 
-            background: none; 
-            border: none; 
-            font-size: 20px; 
-            color: #64748b; 
-            cursor: pointer; 
-            padding: 4px;
+
+        .badge-http {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge-https {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .ssl-status {
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 0.25rem 0.5rem;
             border-radius: 4px;
         }
-        .modal-close:hover { 
-            background: #f1f5f9; 
+
+        .ssl-active {
+            background: #dcfce7;
+            color: #166534;
         }
-        
-        .modal-body { 
-            padding: 32px; 
-            max-height: 70vh; 
+
+        .ssl-pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .lb-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .lb-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .detail-item {
+            background: var(--light);
+            padding: 1rem;
+            border-radius: var(--radius);
+        }
+
+        .detail-label {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--secondary);
+            margin-bottom: 0.25rem;
+        }
+
+        .detail-value {
+            font-size: 0.9rem;
+            color: var(--dark);
+            font-weight: 500;
+        }
+
+        .upstream-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .upstream-item {
+            background: #f1f5f9;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            color: var(--dark);
+            border: 1px solid #e2e8f0;
+        }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 4rem 2rem;
+            color: var(--secondary);
+        }
+
+        .empty-icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+            opacity: 0.5;
+        }
+
+        .empty-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: var(--dark);
+        }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(4px);
+        }
+
+        .modal-content {
+            background: white;
+            margin: 2rem auto;
+            border-radius: var(--radius);
+            width: 600px;
+            max-width: 90vw;
+            max-height: 90vh;
+            overflow: hidden;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .modal-header {
+            padding: 2rem 2rem 1rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--dark);
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            color: var(--secondary);
+            cursor: pointer;
+            padding: 0.5rem;
+            border-radius: 4px;
+        }
+        .modal-close:hover {
+            background: var(--light);
+        }
+
+        .modal-body {
+            padding: 2rem;
+            max-height: 70vh;
             overflow-y: auto;
         }
-        
-        /* Form */
-        .form-group { 
-            margin-bottom: 20px; 
-        }
-        
-        .form-label { 
-            display: block; 
-            margin-bottom: 8px; 
-            font-weight: 500; 
-            color: #374151; 
-            font-size: 14px;
-        }
-        
-        .form-input, .form-select, .form-textarea { 
-            width: 100%; 
-            padding: 12px; 
-            border: 1px solid #d1d5db; 
-            border-radius: 8px; 
-            font-size: 14px;
-            transition: border-color 0.2s;
-        }
-        .form-input:focus, .form-select:focus, .form-textarea:focus { 
-            outline: none; 
-            border-color: #3b82f6; 
-            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1); 
-        }
-        
-        .form-textarea { 
-            height: 100px; 
-            resize: vertical; 
-            font-family: ui-monospace, monospace;
-        }
-        
-        .form-help { 
-            font-size: 12px; 
-            color: #6b7280; 
-            margin-top: 4px;
-        }
-        
-        .form-section { 
-            background: #f8fafc; 
-            border: 1px solid #e2e8f0; 
-            border-radius: 8px; 
-            padding: 20px; 
-            margin: 20px 0;
-        }
-        
-        .form-section-title { 
-            font-size: 16px; 
-            font-weight: 600; 
-            color: #374151; 
-            margin-bottom: 16px;
-        }
-        
-        .form-grid { 
-            display: grid; 
-            grid-template-columns: 1fr 1fr; 
-            gap: 16px;
-        }
-        
-        .form-checkbox-group { 
-            display: flex; 
-            align-items: center; 
-            gap: 8px;
-            margin-bottom: 8px;
-        }
-        
-        .form-checkbox { 
-            width: 16px; 
-            height: 16px; 
-            accent-color: #3b82f6;
-        }
-        
-        .form-checkbox-label { 
-            font-size: 14px; 
-            color: #374151; 
-            cursor: pointer;
-        }
-        
-        .ssl-notice { 
-            background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); 
-            border: 1px solid #93c5fd; 
-            border-radius: 8px; 
-            padding: 16px; 
-            margin: 16px 0;
-        }
-        
-        .ssl-notice-title { 
-            font-weight: 600; 
-            color: #1e40af; 
-            margin-bottom: 4px;
-        }
-        
-        .ssl-notice-text { 
-            font-size: 13px; 
-            color: #1d4ed8;
-        }
-        
-        .modal-footer { 
-            padding: 24px 32px; 
-            border-top: 1px solid #f1f5f9; 
-            display: flex; 
-            gap: 12px; 
+
+        .modal-footer {
+            padding: 1rem 2rem 2rem;
+            display: flex;
+            gap: 1rem;
             justify-content: flex-end;
         }
-        
-        /* Logs Modal */
-        .logs-nav { 
-            display: grid; 
-            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); 
-            gap: 8px; 
-            margin-bottom: 20px;
+
+        /* Form */
+        .form-group {
+            margin-bottom: 1.5rem;
         }
-        
-        .logs-content { 
-            background: #1e293b; 
-            color: #e2e8f0; 
-            border-radius: 8px; 
-            padding: 20px; 
-            font-family: ui-monospace, monospace; 
-            font-size: 12px; 
-            max-height: 400px; 
-            overflow-y: auto; 
-            white-space: pre-wrap;
+
+        .form-label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            color: var(--dark);
+            font-size: 0.9rem;
         }
-        
+
+        .form-input,
+        .form-select,
+        .form-textarea {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            font-size: 1rem;
+            transition: all 0.2s;
+            background: white;
+        }
+
+        .form-input:focus,
+        .form-select:focus,
+        .form-textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgb(37 99 235 / 0.1);
+        }
+
+        .form-textarea {
+            height: 120px;
+            resize: vertical;
+            font-family: ui-monospace, monospace;
+        }
+
+        .form-help {
+            font-size: 0.8rem;
+            color: var(--secondary);
+            margin-top: 0.25rem;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .ssl-notice {
+            background: #eff6ff;
+            border: 1px solid #93c5fd;
+            border-radius: var(--radius);
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+
         /* Responsive */
         @media (max-width: 768px) {
-            .container { padding: 12px; }
-            .header { padding: 20px; flex-direction: column; gap: 16px; }
-            .header-actions { width: 100%; justify-content: center; }
-            .section-header { padding: 20px 24px 12px; flex-direction: column; gap: 12px; align-items: stretch; }
-            .lb-list { padding: 0 24px 24px; }
-            .lb-header { flex-direction: column; gap: 12px; align-items: stretch; }
-            .lb-actions { justify-content: flex-end; }
-            .modal-content { margin: 20px auto; width: 95vw; }
-            .modal-body { padding: 24px; }
-            .form-grid { grid-template-columns: 1fr; }
+            .container {
+                padding: 1rem;
+            }
+
+            .header {
+                flex-direction: column;
+                gap: 1rem;
+                padding: 1.5rem;
+            }
+
+            .header-actions {
+                width: 100%;
+                justify-content: center;
+            }
+
+            .card-header {
+                flex-direction: column;
+                gap: 1rem;
+                align-items: stretch;
+            }
+
+            .lb-header {
+                flex-direction: column;
+                gap: 1rem;
+            }
+
+            .lb-actions {
+                align-self: flex-end;
+            }
+
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .modal-content {
+                margin: 1rem;
+                width: auto;
+            }
+
+            .modal-body {
+                padding: 1.5rem;
+            }
         }
     </style>
 </head>
@@ -448,79 +462,58 @@
     <div class="container">
         <!-- Header -->
         <div class="header">
-            <h1>SimpleLB - Load Balancer Dashboard</h1>
+            <div class="header-brand">
+                <h1>SimpleLB</h1>
+                <p class="header-tagline">Simple Load Balancer • Secure & Scalable</p>
+            </div>
             <div class="header-actions">
-                <button onclick="showLogs()" class="btn btn-outline">View Logs</button>
-                <button onclick="showConfig()" class="btn btn-outline">Edit Config</button>
-                <button onclick="reloadNginx()" class="btn btn-secondary">Reload</button>
-                <a href="/logout" class="btn btn-outline">Logout</a>
+                <a href="/logs" class="btn btn-outline">📝 Logs</a>
+                <a href="/logout" class="btn btn-outline">🚪 Logout</a>
             </div>
         </div>
 
         <!-- Main Content -->
-        <div class="main-section">
-            <div class="section-header">
-                <h2 class="section-title">Load Balancers</h2>
-                <button onclick="openAddModal()" class="btn btn-primary">Add Load Balancer</button>
+        <div class="main-card">
+            <div class="card-header">
+                <h2 class="card-title">Load Balancers</h2>
+                <button onclick="openAddModal()" class="btn btn-primary">➕ Add Load Balancer</button>
             </div>
             
             <div class="lb-list">
-                {{if .config.LoadBalancers}}
-                    {{range .config.LoadBalancers}}
+                {{if .loadBalancers}}
+                    {{range .loadBalancers}}
                     <div class="lb-item">
                         <div class="lb-header">
-                            <div class="lb-domain">
+                            <div class="lb-info">
                                 <div class="domain-name">
-                                    {{.Domain}}
-                                    <span class="protocol-badge {{if eq .Protocol "https"}}protocol-https{{else}}protocol-http{{end}}">
-                                        {{if eq .Protocol "https"}}HTTPS{{else}}HTTP{{end}}
-                                    </span>
-                                    {{if eq .Protocol "https"}}
-                                        {{if eq .SSLStatus "active"}}
-                                        <span class="ssl-status ssl-active">SSL Active</span>
-                                        {{else if eq .SSLStatus "requesting"}}
-                                        <span class="ssl-status ssl-pending">Requesting...</span>
-                                        {{else if eq .SSLStatus "failed"}}
-                                        <span class="ssl-status ssl-failed">SSL Failed</span>
-                                        {{else}}
-                                        <span class="ssl-status ssl-pending">SSL Pending</span>
-                                        {{end}}
-                                    {{end}}
+                                    {{.domain}}
                                 </div>
                             </div>
                             <div class="lb-actions">
-                                {{if and (eq .Protocol "https") (eq .SSLStatus "failed")}}
-                                <button onclick="retryCert('{{.Domain}}')" class="btn btn-outline">Retry SSL</button>
-                                {{end}}
-                                <button onclick="editLB('{{.Domain}}')" class="btn btn-outline">Edit</button>
-                                <button onclick="deleteLB('{{.Domain}}')" class="btn btn-danger">Delete</button>
+                                <button onclick="editLB('{{.domain}}')" class="btn btn-outline">✏️ Edit</button>
+                                <button onclick="deleteLB('{{.domain}}')" class="btn btn-danger">🗑️ Delete</button>
                             </div>
                         </div>
                         
-                        <div class="lb-config">
-                            <div class="config-item">
-                                <div class="config-label">Load Balancing</div>
-                                <div class="config-value">
-                                    {{if eq .Config.Method "round_robin"}}Round Robin{{end}}
-                                    {{if eq .Config.Method "least_conn"}}Least Connections{{end}}
-                                    {{if eq .Config.Method "ip_hash"}}IP Hash{{end}}
-                                    {{if eq .Config.Method "hash"}}Hash{{end}}
-                                    {{if .Config.SessionSticky}} + Sticky{{end}}
+                        <div class="lb-details">
+                            <div class="detail-item">
+                                <div class="detail-label">Load Balancing</div>
+                                <div class="detail-value">
+                                    {{if eq .method "random"}}Random{{end}}
+                                    {{if eq .method "round_robin"}}Round Robin{{end}}
+                                    {{if eq .method "least_conn"}}Least Connections{{end}}
+                                    {{if eq .method "first"}}First Available{{end}}
+                                    {{if eq .method "ip_hash"}}IP Hash{{end}}
+                                    {{if eq .method "header"}}Header Hash{{end}}
+                                    {{if eq .method "cookie"}}Cookie Hash{{end}}
                                 </div>
                             </div>
                             
-                            {{if .Config.EnableCache}}
-                            <div class="config-item">
-                                <div class="config-label">Caching</div>
-                                <div class="config-value">{{.Config.CacheTime}}</div>
-                            </div>
-                            {{end}}
-                            
-                            <div class="config-item">
-                                <div class="config-label">Upstream Servers</div>
+                            <div class="detail-item">
+                                <div class="detail-label">Backend Servers ({{len .backends}})</div>
                                 <div class="upstream-list">
-                                    {{range .Upstreams}}
-                                    <span class="upstream-item">{{.Host}}:{{.Port}}</span>
+                                    {{range .backends}}
+                                    <span class="upstream-item">{{.}}</span>
                                     {{end}}
                                 </div>
                             </div>
@@ -528,10 +521,10 @@
                     </div>
                     {{end}}
                 {{else}}
-                    <div class="no-items">
-                        <div class="no-items-icon">⚖️</div>
-                        <h3>No Load Balancers</h3>
-                        <p>Get started by adding your first load balancer</p>
+                    <div class="empty-state">
+                        <div class="empty-icon">⚖️</div>
+                        <h3 class="empty-title">No Load Balancers</h3>
+                        <p>Get started by adding your first load balancer with automatic HTTPS</p>
                     </div>
                 {{end}}
             </div>
@@ -548,73 +541,48 @@
             <form id="lbForm" method="post" action="/add">
                 <div class="modal-body">
                     <div class="form-group">
-                        <label class="form-label">Domain</label>
-                        <input type="text" name="domain" id="domainInput" class="form-input" placeholder="example.com" required>
-                        <div class="form-help">Enter the domain name that nginx should listen for</div>
+                        <label class="form-label">Domain Name</label>
+                        <input type="text" name="domain" id="domainInput" class="form-input" 
+                               placeholder="example.com" required>
+                        <div class="form-help">The domain that Caddy should handle (e.g., api.company.com)</div>
                     </div>
                     
                     <div class="form-group">
-                        <label class="form-label">Protocol</label>
-                        <select name="protocol" id="protocolSelect" class="form-select" onchange="toggleSSLFields()">
-                            <option value="http">HTTP (Port 80)</option>
-                            <option value="https">HTTPS (Port 443) - Auto SSL</option>
-                        </select>
-                        <div class="form-help">HTTPS automatically obtains SSL certificates from Let's Encrypt</div>
-                    </div>
-                    
-                    <div id="sslFields" class="ssl-notice" style="display: none;">
-                        <div class="ssl-notice-title">SSL Configuration</div>
-                        <div class="form-group" style="margin-bottom: 0;">
-                            <label class="form-label">Email for Let's Encrypt</label>
-                            <input type="email" name="ssl_email" id="sslEmailInput" class="form-input" placeholder="your-email@example.com">
-                            <div class="form-help ssl-notice-text">Required for certificate notifications and account recovery</div>
-                        </div>
                     </div>
                     
                     <div class="form-group">
-                        <label class="form-label">Upstream Servers</label>
-                        <textarea name="upstreams" id="upstreamsInput" class="form-textarea" placeholder="192.168.1.100:8080&#10;192.168.1.101:8080&#10;192.168.1.102:8080" required></textarea>
-                        <div class="form-help">One server per line. Format: IP:PORT or IP:PORT:weight:max_fails:fail_timeout</div>
+                        <label class="form-label">Backend Servers</label>
+                        <textarea name="backends" id="upstreamsInput" class="form-textarea" 
+                                  placeholder="192.168.1.100:8080&#10;192.168.1.101:8080&#10;app-server-03:3000" required></textarea>
+                        <div class="form-help">One server per line. Format: hostname:port or ip:port</div>
                     </div>
                     
-                    <div class="form-section">
-                        <div class="form-section-title">Advanced Configuration</div>
-                        
-                        <div class="form-grid">
-                            <div class="form-group">
-                                <label class="form-label">Load Balancing Method</label>
-                                <select name="method" id="methodSelect" class="form-select">
-                                    <option value="round_robin">Round Robin</option>
-                                    <option value="least_conn">Least Connections</option>
-                                    <option value="ip_hash">IP Hash</option>
-                                    <option value="hash">Hash (custom)</option>
-                                </select>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label class="form-label">Hash Key (for hash method)</label>
-                                <input type="text" name="hash_key" id="hashKeyInput" class="form-input" value="$remote_addr" placeholder="$remote_addr">
-                                <div class="form-help">e.g., $remote_addr, $uri, $request_uri</div>
-                            </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label class="form-label">Load Balancing Method</label>
+                            <select name="method" id="methodSelect" class="form-select" onchange="toggleHashOptions()">
+                                <option value="random">Random (Default)</option>
+                                <option value="round_robin">Round Robin</option>
+                                <option value="least_conn">Least Connections</option>
+                                <option value="first">First Available</option>
+                                <option value="ip_hash">IP Hash</option>
+                                <option value="header">Header Hash</option>
+                                <option value="cookie">Cookie Hash</option>
+                            </select>
                         </div>
                         
-                        <div class="form-grid">
-                            <div class="form-group">
-                                <div class="form-checkbox-group">
-                                    <input type="checkbox" name="session_sticky" id="sessionStickyInput" class="form-checkbox">
-                                    <label for="sessionStickyInput" class="form-checkbox-label">Session Persistence</label>
-                                </div>
-                                <div class="form-help">Forces same client to same server</div>
-                            </div>
-                            
-                            <div class="form-group">
-                                <div class="form-checkbox-group">
-                                    <input type="checkbox" name="enable_cache" id="enableCacheInput" class="form-checkbox">
-                                    <label for="enableCacheInput" class="form-checkbox-label">Enable Proxy Caching</label>
-                                    <input type="text" name="cache_time" id="cacheTimeInput" class="form-input" value="1h" placeholder="1h" style="width: 70px; margin-left: 12px;">
-                                </div>
-                                <div class="form-help">Cache duration (e.g., 1h, 30m, 1d)</div>
-                            </div>
+                        <div class="form-group">
+                            <label class="form-label">Hash Key</label>
+                            <select name="hash_key" id="hashKeySelect" class="form-select" disabled>
+                                <option value="">Not applicable</option>
+                                <option value="X-Forwarded-For">X-Forwarded-For Header</option>
+                                <option value="X-Real-IP">X-Real-IP Header</option>
+                                <option value="X-User-ID">X-User-ID Header</option>
+                                <option value="Authorization">Authorization Header</option>
+                                <option value="session_id">session_id Cookie</option>
+                                <option value="user_session">user_session Cookie</option>
+                            </select>
+                            <div class="form-help">Select hash key for header/cookie-based load balancing</div>
                         </div>
                     </div>
                 </div>
@@ -627,59 +595,9 @@
         </div>
     </div>
 
-    <!-- Logs Modal -->
-    <div id="logsModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">System Logs</h3>
-                <button class="modal-close" onclick="closeLogsModal()">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="logs-nav">
-                    <button onclick="showLogs('error')" class="btn btn-danger">Nginx Errors</button>
-                    <button onclick="showLogs('access')" class="btn btn-secondary">Nginx Access</button>
-                    <button onclick="showLogs('app')" class="btn btn-outline">App Errors</button>
-                    <button onclick="showLogs('letsencrypt')" class="btn btn-outline">SSL Logs</button>
-                    <button onclick="refreshLogs()" class="btn btn-outline">Refresh</button>
-                </div>
-                <div id="logsContent" class="logs-content">
-                    Click a log type above to view logs...
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Config Modal -->
-    <div id="configModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Nginx Configuration</h3>
-                <button class="modal-close" onclick="closeConfigModal()">&times;</button>
-            </div>
-            <form id="configForm" onsubmit="saveConfig(event)">
-                <div class="modal-body">
-                    <div style="display: flex; gap: 8px; margin-bottom: 16px;">
-                        <button type="button" onclick="downloadConfig()" class="btn btn-outline">Download Backup</button>
-                        <button type="button" onclick="refreshConfig()" class="btn btn-outline">Refresh</button>
-                        <button type="button" onclick="validateConfig()" class="btn btn-outline">Validate</button>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Configuration File</label>
-                        <textarea id="configEditor" name="config" class="form-textarea" style="height: 400px; font-family: ui-monospace, monospace; font-size: 12px;" required></textarea>
-                        <div class="form-help">Direct edit of nginx configuration - Be careful with syntax!</div>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" onclick="closeConfigModal()" class="btn btn-outline">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Save & Validate</button>
-                </div>
-            </form>
-        </div>
-    </div>
 
     <script>
         let isEditMode = false;
-        let currentLogType = 'error';
 
         function openAddModal() {
             isEditMode = false;
@@ -688,8 +606,9 @@
             document.getElementById('lbForm').action = '/add';
             document.getElementById('lbForm').reset();
             document.getElementById('lbModal').style.display = 'block';
-            toggleSSLFields();
+            toggleHashOptions();
         }
+
 
         function editLB(domain) {
             isEditMode = true;
@@ -697,46 +616,31 @@
             document.getElementById('submitBtn').textContent = 'Save Changes';
             document.getElementById('lbForm').action = '/edit/' + encodeURIComponent(domain);
             
+            // Fetch load balancer data
             fetch('/edit/' + encodeURIComponent(domain))
-                .then(response => response.json())
-                .then(data => {
-                    if (data.error) {
-                        alert('Error: ' + data.error);
-                        return;
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Failed to fetch load balancer data');
                     }
+                    return response.json();
+                })
+                .then(data => {
+                    // Populate form fields
+                    document.getElementById('domainInput').value = data.domain || '';
                     
-                    document.getElementById('domainInput').value = data.domain;
-                    document.getElementById('protocolSelect').value = data.protocol || 'http';
-                    document.getElementById('sslEmailInput').value = data.ssl_email || '';
+                    document.getElementById('methodSelect').value = data.method || 'random';
+                    document.getElementById('hashKeySelect').value = data.hash_key || '';
+                    document.getElementById('upstreamsInput').value = data.backends || '';
                     
-                    toggleSSLFields();
+                    // Show hash fields based on selections
+                    toggleHashOptions();
                     
-                    const upstreams = data.upstreams.map(u => {
-                        let upstream = u.host + ':' + u.port;
-                        if (u.weight && u.weight !== 1) upstream += ':' + u.weight;
-                        if (u.max_fails && u.max_fails !== 3) {
-                            if (!upstream.includes(':' + u.weight)) upstream += ':1';
-                            upstream += ':' + u.max_fails;
-                        }
-                        if (u.fail_timeout && u.fail_timeout !== '10s') {
-                            if (!upstream.includes(':' + u.max_fails)) upstream += ':1:3';
-                            upstream += ':' + u.fail_timeout;
-                        }
-                        return upstream;
-                    }).join('\n');
-                    document.getElementById('upstreamsInput').value = upstreams;
-                    
-                    const config = data.config || {};
-                    document.getElementById('methodSelect').value = config.method || 'round_robin';
-                    document.getElementById('hashKeyInput').value = config.hash_key || '$remote_addr';
-                    document.getElementById('sessionStickyInput').checked = config.session_sticky || false;
-                    document.getElementById('enableCacheInput').checked = config.enable_cache || false;
-                    document.getElementById('cacheTimeInput').value = config.cache_time || '1h';
-                    
+                    // Show modal
                     document.getElementById('lbModal').style.display = 'block';
                 })
                 .catch(error => {
-                    alert('Error loading load balancer data: ' + error);
+                    console.error('Error loading load balancer:', error);
+                    alert('❌ Error loading load balancer data: ' + error.message);
                 });
         }
 
@@ -744,199 +648,68 @@
             document.getElementById('lbModal').style.display = 'none';
         }
 
-        function toggleSSLFields() {
-            const protocol = document.getElementById('protocolSelect').value;
-            const sslFields = document.getElementById('sslFields');
-            const sslEmail = document.getElementById('sslEmailInput');
+// SSL fields removed; automatic HTTPS is global
+
+        function toggleHashOptions() {
+            const method = document.getElementById('methodSelect').value;
+            const hashKeySelect = document.getElementById('hashKeySelect');
             
-            if (protocol === 'https') {
-                sslFields.style.display = 'block';
-                sslEmail.required = true;
+            if (method === 'header' || method === 'cookie') {
+                hashKeySelect.disabled = false;
+                hashKeySelect.required = true;
             } else {
-                sslFields.style.display = 'none';
-                sslEmail.required = false;
+                hashKeySelect.disabled = true;
+                hashKeySelect.required = false;
+                hashKeySelect.value = '';
             }
         }
 
         function deleteLB(domain) {
-            if (confirm('Are you sure you want to delete the load balancer for ' + domain + '?')) {
+            if (confirm('⚠️ Are you sure you want to delete the load balancer for ' + domain + '?\n\nThis action cannot be undone.')) {
+                const button = event.target;
+                const originalText = button.innerHTML;
+                button.innerHTML = '🗑️ Deleting...';
+                button.disabled = true;
+                
+                // Use fetch to submit delete request
                 fetch('/delete/' + encodeURIComponent(domain), {
-                    method: 'DELETE'
-                }).then(() => {
-                    location.reload();
+                    method: 'POST'
+                })
+                .then(response => {
+                    if (response.redirected) {
+                        // Successful deletion, redirect to dashboard
+                        window.location.href = response.url;
+                    } else if (!response.ok) {
+                        throw new Error('Delete request failed');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error deleting load balancer:', error);
+                    alert('❌ Error deleting load balancer: ' + error.message);
+                    button.innerHTML = originalText;
+                    button.disabled = false;
                 });
             }
         }
 
-        function reloadNginx() {
-            const button = event.target;
-            const originalText = button.innerHTML;
-            button.innerHTML = 'Reloading...';
-            button.disabled = true;
-            
-            fetch('/reload', {
-                method: 'POST'
-            }).then(response => response.json()).then(data => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-                
-                if (data.status === 'reloaded') {
-                    alert('✅ ' + (data.message || 'Nginx configuration reloaded successfully!'));
-                } else {
-                    alert('❌ Error: ' + (data.error || 'Unknown error'));
-                }
-            }).catch(error => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-                alert('❌ Network error: ' + error.message);
-            });
-        }
-
-        function retryCert(domain) {
-            if (!confirm('Retry SSL certificate generation for ' + domain + '?')) return;
-            
-            const button = event.target;
-            const originalText = button.innerHTML;
-            button.innerHTML = 'Retrying...';
-            button.disabled = true;
-            
-            fetch('/retry-cert/' + encodeURIComponent(domain), {
-                method: 'POST'
-            }).then(response => response.json()).then(data => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-                
-                if (data.status === 'started') {
-                    alert('✅ Certificate retry started! Page will refresh to show status.');
-                    setTimeout(() => location.reload(), 2000);
-                } else {
-                    alert('❌ Error: ' + (data.error || 'Unknown error'));
-                }
-            }).catch(error => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-                alert('❌ Network error: ' + error.message);
-            });
-        }
-
-        function showLogs(type = 'error') {
-            currentLogType = type;
-            document.getElementById('logsModal').style.display = 'block';
-            document.getElementById('logsContent').innerHTML = '⏳ Loading ' + type + ' logs...';
-            
-            fetch('/logs?type=' + type + '&lines=100')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.logs) {
-                        document.getElementById('logsContent').innerHTML = data.logs || 'No logs found.';
-                    } else {
-                        document.getElementById('logsContent').innerHTML = '❌ Error loading logs: ' + (data.error || 'Unknown error');
-                    }
-                })
-                .catch(error => {
-                    document.getElementById('logsContent').innerHTML = '❌ Network error: ' + error.message;
-                });
-        }
-
-        function refreshLogs() {
-            showLogs(currentLogType);
-        }
-
-        function closeLogsModal() {
-            document.getElementById('logsModal').style.display = 'none';
-        }
-
-        function showConfig() {
-            document.getElementById('configModal').style.display = 'block';
-            document.getElementById('configEditor').value = '⏳ Loading configuration...';
-            
-            fetch('/config')
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('configEditor').value = data.content;
-                })
-                .catch(error => {
-                    document.getElementById('configEditor').value = '❌ Error loading configuration: ' + error.message;
-                });
-        }
-
-        function refreshConfig() {
-            showConfig();
-        }
-
-        function downloadConfig() {
-            window.open('/config/backup', '_blank');
-        }
-
-        function validateConfig() {
-            const config = document.getElementById('configEditor').value;
-            const formData = new FormData();
-            formData.append('config', config);
-            
-            fetch('/config', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'saved') {
-                    alert('✅ Configuration is valid!\n\n' + (data.test_output || 'Syntax check passed.'));
-                } else {
-                    alert('❌ Configuration error: ' + (data.error || 'Unknown error'));
-                }
-            })
-            .catch(error => {
-                alert('❌ Network error: ' + error.message);
-            });
-        }
-
-        function saveConfig(event) {
-            event.preventDefault();
-            
-            const button = event.target.querySelector('button[type="submit"]');
-            const originalText = button.innerHTML;
-            button.innerHTML = 'Saving...';
-            button.disabled = true;
-            
-            const formData = new FormData(event.target);
-            
-            fetch('/config', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-                
-                if (data.status === 'saved') {
-                    alert('✅ ' + (data.message || 'Configuration saved successfully!'));
-                    closeConfigModal();
-                } else {
-                    alert('❌ Error: ' + (data.error || 'Unknown error'));
-                }
-            })
-            .catch(error => {
-                button.innerHTML = originalText;
-                button.disabled = false;
-                alert('❌ Network error: ' + error.message);
-            });
-        }
-
-        function closeConfigModal() {
-            document.getElementById('configModal').style.display = 'none';
-        }
 
         // Close modals when clicking outside
         window.onclick = function(event) {
-            const modals = ['lbModal', 'logsModal', 'configModal'];
-            modals.forEach(modalId => {
-                const modal = document.getElementById(modalId);
-                if (event.target === modal) {
-                    modal.style.display = 'none';
-                }
-            });
+            const modal = document.getElementById('lbModal');
+            if (event.target === modal) {
+                modal.style.display = 'none';
+            }
         }
+
+        // Simple form validation
+        document.getElementById('lbForm').addEventListener('submit', function(e) {
+            const backends = document.getElementById('upstreamsInput').value.trim();
+            if (!backends) {
+                e.preventDefault();
+                alert('⚠️ Please add at least one backend server');
+                return;
+            }
+        });
     </script>
 </body>
 </html>

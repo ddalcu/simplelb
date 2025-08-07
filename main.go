@@ -1,216 +1,499 @@
+// Package main implements SimpleLB - a minimal web interface for managing
+// Caddy load balancers via the Caddy Admin API.
+// No config files, no parsing - pure API calls.
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"html/template"
-	"io/ioutil"
-	"log"
-	"net/http"
-	"os"
-	"os/exec"
-	"strconv"
-	"strings"
+    "bytes"
+    "context"
+    "crypto/rand"
+    "crypto/rsa"
+    "crypto/tls"
+    "crypto/x509"
+    "crypto/x509/pkix"
+    "encoding/json"
+    "encoding/pem"
+    "fmt"
+    "io"
+    "log/slog"
+    "math/big"
+    "net"
+    "net/http"
+    "os"
+    "os/signal"
+    "path/filepath"
+    "sort"
+    "strings"
+    "syscall"
+    "time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/gorilla/sessions"
+    "github.com/gin-gonic/gin"
+    "github.com/gorilla/sessions"
 )
+
+// Configuration constants
+const (
+	DefaultManagementPort = "81"
+	DefaultAdminUsername  = "admin" 
+	DefaultAdminPassword  = "password"
+	CaddyAdminURL        = "http://127.0.0.1:2019"
+	RequestTimeout       = 30 * time.Second
+	SessionName          = "caddy-lb-session"
+)
+
+// Simple UI request structure (protocol and ssl email removed; automatic HTTPS is global)
+type LoadBalancerRequest struct {
+    Domain   string `json:"domain"`
+    Backends string `json:"backends"`
+    Method   string `json:"method"`
+    HashKey  string `json:"hash_key,omitempty"`
+}
+
+// Caddy typed structures for the subset we use
+type SelectionPolicy struct {
+    Policy string `json:"policy,omitempty"`
+    Header string `json:"header,omitempty"`
+    Cookie string `json:"cookie,omitempty"`
+}
+
+type LoadBalancing struct {
+    SelectionPolicy *SelectionPolicy `json:"selection_policy,omitempty"`
+}
 
 type Upstream struct {
-	Host      string `json:"host"`
-	Port      string `json:"port"`
-	Weight    int    `json:"weight"`    // Server weight (1-100)
-	MaxFails  int    `json:"max_fails"` // Health check max failures
-	FailTimeout string `json:"fail_timeout"` // Health check fail timeout
+    Dial string `json:"dial"`
 }
 
-type LoadBalancerConfig struct {
-	Method      string `json:"method"`       // "round_robin", "least_conn", "ip_hash", "hash"
-	HashKey     string `json:"hash_key"`     // For hash method (e.g., "$remote_addr", "$uri")
-	EnableCache bool   `json:"enable_cache"` // Enable proxy caching
-	CacheTime   string `json:"cache_time"`   // Cache duration (e.g., "1h", "30m")
-	SessionSticky bool `json:"session_sticky"` // Session persistence using ip_hash
+type Handle struct {
+    Handler       string         `json:"handler"`
+    Upstreams     []Upstream     `json:"upstreams,omitempty"`
+    LoadBalancing *LoadBalancing `json:"load_balancing,omitempty"`
 }
 
-type LoadBalancer struct {
-	Domain    string              `json:"domain"`
-	Protocol  string              `json:"protocol"`  // "http" or "https"
-	SSLEmail  string              `json:"ssl_email"` // Email for Let's Encrypt
-	Upstreams []Upstream          `json:"upstreams"`
-	Config    LoadBalancerConfig  `json:"config"`    // Advanced configuration
-	SSLStatus string              `json:"ssl_status,omitempty"` // "pending", "active", "failed"
+type Match struct {
+    Host []string `json:"host,omitempty"`
 }
 
-type Config struct {
-	LoadBalancers []LoadBalancer `json:"load_balancers"`
+type CaddyRoute struct {
+    Match  []Match  `json:"match,omitempty"`
+    Handle []Handle `json:"handle,omitempty"`
 }
 
-var (
-	store      = sessions.NewCookieStore([]byte("secret-key"))
-	configFile = "/app/data/config.json"
-	config     = Config{}
-)
+// Application holds the application state
+type Application struct {
+	store      *sessions.CookieStore
+	httpClient *http.Client
+	logger     *slog.Logger
+}
 
-// getDefaultLoadBalancerConfig returns optimal default settings
-func getDefaultLoadBalancerConfig() LoadBalancerConfig {
-	return LoadBalancerConfig{
-		Method:        "round_robin", // Best for general use
-		HashKey:       "$remote_addr", // Default hash key if needed
-		EnableCache:   false,         // Disabled by default for safety
-		CacheTime:     "1h",          // Conservative cache time
-		SessionSticky: false,         // Disabled by default
+// NewApplication creates a new application instance
+func NewApplication() *Application {
+	// Set up file logging for the application
+	logFile, err := os.OpenFile("/app/data/logs/simplelb/app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		// Fall back to stdout if file logging fails
+		logFile = os.Stdout
 	}
-}
 
-// getDefaultUpstream returns optimal default upstream settings
-func getDefaultUpstream(host, port string) Upstream {
-	return Upstream{
-		Host:        host,
-		Port:        port,
-		Weight:      1,   // Equal weight
-		MaxFails:    3,   // Industry standard
-		FailTimeout: "10s", // Quick recovery
+	logger := slog.New(slog.NewJSONHandler(logFile, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+
+	// Get session secret from environment or use a default (not recommended for production)
+	sessionSecret := os.Getenv("SESSION_SECRET")
+	if sessionSecret == "" {
+		sessionSecret = "default-secret-key-change-this-in-production"
+		logger.Warn("Using default session secret - set SESSION_SECRET environment variable for production")
 	}
-}
 
-// parseIntDefault parses an integer with a default value
-func parseIntDefault(s string, defaultVal int) int {
-	if val := strings.TrimSpace(s); val != "" {
-		if i, err := strconv.Atoi(val); err == nil {
-			return i
-		}
-	}
-	return defaultVal
-}
-
-// requestLetsEncryptCertificate requests an SSL certificate from Let's Encrypt
-func requestLetsEncryptCertificate(domain, email string) error {
-	log.Printf("Requesting Let's Encrypt certificate for domain: %s", domain)
-	
-	// First, create a temporary nginx config to serve the ACME challenge
-	tempConfigPath := "/app/data/nginx/temp-" + strings.ReplaceAll(domain, ".", "_") + ".conf"
-	tempConfig := fmt.Sprintf(`
-server {
-    listen 80;
-    server_name %s;
-    
-    location /.well-known/acme-challenge/ {
-        root /app/data/certbot;
-        try_files $uri =404;
+    store := sessions.NewCookieStore([]byte(sessionSecret))
+    store.Options = &sessions.Options{
+        Path:     "/",
+        HttpOnly: true,
+        SameSite: http.SameSiteLaxMode,
+        MaxAge:   86400 * 7,
+        Secure:   os.Getenv("SESSION_COOKIE_SECURE") == "1",
     }
-    
-    location / {
-        return 301 https://$server_name$request_uri;
+
+    return &Application{
+        store: store,
+        httpClient: &http.Client{Timeout: RequestTimeout},
+        logger:     logger,
     }
 }
-`, domain)
-	
-	// Create the webroot directory
-	os.MkdirAll("/app/data/certbot", 0755)
-	
-	// Write temporary config
-	err := ioutil.WriteFile(tempConfigPath, []byte(tempConfig), 0644)
+
+// CaddyAPI helper methods
+func (app *Application) callCaddyAPI(method, path string, body []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+	defer cancel()
+
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewBuffer(body)
+	}
+
+    baseURL := getEnv("CADDY_ADMIN_URL", CaddyAdminURL)
+    req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(baseURL, "/")+path, reqBody)
 	if err != nil {
-		return fmt.Errorf("failed to create temporary nginx config: %v", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
-	// Reload nginx with temporary config
-	reloadCmd := exec.Command("nginx", "-s", "reload")
-	if err := reloadCmd.Run(); err != nil {
-		log.Printf("Warning: Failed to reload nginx for ACME challenge: %v", err)
+
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
-	
-	// Run certbot to get the certificate
-	certbotCmd := exec.Command("certbot", "certonly", 
-		"--webroot", 
-		"--webroot-path=/app/data/certbot",
-		"--config-dir", "/app/data/letsencrypt",
-		"--work-dir", "/app/data/letsencrypt",
-		"--logs-dir", "/app/data/logs",
-		"--email", email,
-		"--agree-tos", 
-		"--no-eff-email",
-		"--keep-until-expiring",
-		"--non-interactive",
-		"-d", domain)
-	
-	output, err := certbotCmd.CombinedOutput()
-	log.Printf("Certbot output: %s", string(output))
-	
-	// Clean up temporary config
-	os.Remove(tempConfigPath)
-	
+
+	resp, err := app.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("certbot failed: %v\nOutput: %s", err, string(output))
+		return nil, fmt.Errorf("failed to call Caddy API: %w", err)
 	}
-	
-	// Check if certificates were created
-	certPath := fmt.Sprintf("/app/data/letsencrypt/live/%s/fullchain.pem", domain)
-	keyPath := fmt.Sprintf("/app/data/letsencrypt/live/%s/privkey.pem", domain)
-	
-	if _, err := os.Stat(certPath); os.IsNotExist(err) {
-		return fmt.Errorf("certificate file not found at %s", certPath)
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
-	
-	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
-		return fmt.Errorf("private key file not found at %s", keyPath)
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("Caddy API error (status %d): %s", resp.StatusCode, string(respBody))
 	}
-	
-	log.Printf("Successfully obtained Let's Encrypt certificate for %s", domain)
+
+	return respBody, nil
+}
+
+func (app *Application) getCaddyConfig() (map[string]interface{}, error) {
+    respBody, err := app.callCaddyAPI("GET", "/config/", nil)
+    if err != nil {
+        return nil, err
+    }
+
+    var config map[string]interface{}
+    if err := json.Unmarshal(respBody, &config); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+    }
+
+    return config, nil
+}
+
+// Simplified casting helpers
+func asMap(v interface{}) map[string]interface{} {
+	if m, ok := v.(map[string]interface{}); ok {
+		return m
+	}
 	return nil
 }
 
-func main() {
-	loadConfig()
-	
-	r := gin.New()
-	r.Use(gin.Logger())
-	
-	r.LoadHTMLGlob("/app/templates/*")
-	r.Static("/static", "./static")
-	
-	r.GET("/", showLogin)
-	r.POST("/login", handleLogin)
-	r.GET("/dashboard", authRequired(), showDashboard)
-	r.POST("/add", authRequired(), addLoadBalancer)
-	r.GET("/edit/:domain", authRequired(), getLoadBalancer)
-	r.POST("/edit/:domain", authRequired(), editLoadBalancer)
-	r.DELETE("/delete/:domain", authRequired(), deleteLoadBalancer)
-	r.POST("/reload", authRequired(), reloadNginx)
-	r.GET("/logs", authRequired(), getNginxLogs)
-	r.GET("/config-check", authRequired(), checkNginxConfig)
-	r.GET("/config", authRequired(), getConfig)
-	r.POST("/config", authRequired(), updateConfig)
-	r.GET("/config/backup", authRequired(), backupConfig)
-	r.POST("/retry-cert/:domain", authRequired(), retryCertificate)
-	r.GET("/logout", handleLogout)
-	
-	port := os.Getenv("MANAGEMENT_PORT")
-	if port == "" {
-		port = "81"
+func asArray(v interface{}) []interface{} {
+	if a, ok := v.([]interface{}); ok {
+		return a
 	}
-	
-	log.Printf("Management UI starting on port %s", port)
-	r.Run(":" + port)
+	return nil
 }
 
-func loadConfig() {
-	if data, err := ioutil.ReadFile(configFile); err == nil {
-		json.Unmarshal(data, &config)
+func asString(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
 	}
+	return ""
 }
 
-func saveConfig() error {
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-	return ioutil.WriteFile(configFile, data, 0644)
+// Get routes directly from Caddy HTTP server routes endpoint
+func (app *Application) getCaddyRoutes() ([]CaddyRoute, error) {
+    respBody, err := app.callCaddyAPI("GET", "/config/apps/http/servers/main/routes", nil)
+    if err != nil {
+        return []CaddyRoute{}, nil
+    }
+    var routes []CaddyRoute
+    if err := json.Unmarshal(respBody, &routes); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal routes: %w", err)
+    }
+    return routes, nil
 }
 
-func authRequired() gin.HandlerFunc {
+func (app *Application) getLoadBalancers() ([]map[string]interface{}, error) {
+    routes, err := app.getCaddyRoutes()
+    if err != nil {
+        return nil, err
+    }
+    var loadBalancers []map[string]interface{}
+    for _, route := range routes {
+        if lb := app.parseRouteToLoadBalancer(route); lb != nil {
+            loadBalancers = append(loadBalancers, lb)
+        }
+    }
+    return loadBalancers, nil
+}
+
+// Extract domain from route match - simplified
+func (app *Application) parseRouteToLoadBalancer(route CaddyRoute) map[string]interface{} {
+    if len(route.Match) == 0 || len(route.Match[0].Host) == 0 {
+        return nil
+    }
+    domain := route.Match[0].Host[0]
+    if len(route.Handle) == 0 || route.Handle[0].Handler != "reverse_proxy" {
+        return nil
+    }
+    var backends []string
+    for _, u := range route.Handle[0].Upstreams {
+        if strings.TrimSpace(u.Dial) != "" {
+            backends = append(backends, u.Dial)
+        }
+    }
+    method := "random"
+    if lb := route.Handle[0].LoadBalancing; lb != nil && lb.SelectionPolicy != nil && strings.TrimSpace(lb.SelectionPolicy.Policy) != "" {
+        method = lb.SelectionPolicy.Policy
+    }
+    return map[string]interface{}{
+        "domain":   domain,
+        "backends": backends,
+        "method":   method,
+    }
+}
+
+func (app *Application) initializeCaddyConfig() error {
+    // Try to load saved configuration first
+    savedConfig, err := app.loadSavedConfig()
+    if err == nil && savedConfig != nil {
+        app.logger.Info("Loading saved configuration")
+        configJSON, err := json.Marshal(savedConfig)
+        if err != nil {
+            return fmt.Errorf("failed to marshal saved config: %w", err)
+        }
+
+        _, err = app.callCaddyAPI("POST", "/load", configJSON)
+        if err != nil {
+            app.logger.Warn("Failed to load saved config, initializing fresh", "error", err)
+        } else {
+            app.logger.Info("Saved configuration loaded successfully")
+            return nil
+        }
+    } else {
+        app.logger.Info("No saved config found, initializing fresh", "error", err)
+    }
+
+    // Attempt to set a minimal, modern config that enables both HTTP and HTTPS
+    // with automatic HTTPS (default). If Caddy already has config, this may fail, which is acceptable.
+    initial := map[string]interface{}{
+        "apps": map[string]interface{}{
+            "http": map[string]interface{}{
+                "servers": map[string]interface{}{
+                    "main": map[string]interface{}{
+                        "listen": []string{":80", ":443"},
+                        "routes": []interface{}{},
+                    },
+                },
+                "https_port":     443,
+                "http_port":      80,
+                "grace_period":   "5s",
+                "shutdown_delay": "5s",
+            },
+            "tls": map[string]interface{}{
+                "automation": map[string]interface{}{
+                    "policies": func() []interface{} {
+                        email := strings.TrimSpace(os.Getenv("ACME_EMAIL"))
+                        issuer := map[string]interface{}{"module": "acme"}
+                        if email != "" {
+                            issuer["email"] = email
+                        }
+                        return []interface{}{
+                            map[string]interface{}{
+                                "issuers": []interface{}{issuer},
+                            },
+                        }
+                    }(),
+                },
+            },
+        },
+        "logging": map[string]interface{}{
+            "logs": map[string]interface{}{
+                "default": map[string]interface{}{
+                    "writer": map[string]interface{}{
+                        "output":   "file",
+                        "filename": "/app/data/logs/caddy/error.log",
+                    },
+                    "level": "INFO",
+                },
+                "access": map[string]interface{}{
+                    "writer": map[string]interface{}{
+                        "output":   "file",
+                        "filename": "/app/data/logs/caddy/access.log",
+                    },
+                    "encoder": map[string]interface{}{
+                        "format": "json",
+                    },
+                },
+            },
+        },
+    }
+
+    configJSON, err := json.Marshal(initial)
+    if err != nil {
+        return fmt.Errorf("failed to marshal initial config: %w", err)
+    }
+    if _, err := app.callCaddyAPI("POST", "/load", configJSON); err != nil {
+        app.logger.Warn("Failed to load initial config (may already be configured)", "error", err)
+    }
+    return nil
+}
+
+func (app *Application) createLoadBalancer(req LoadBalancerRequest) error {
+	// Ensure Caddy config is initialized
+	if err := app.initializeCaddyConfig(); err != nil {
+		return fmt.Errorf("failed to initialize Caddy config: %w", err)
+	}
+
+	// Parse backends
+	backendLines := strings.Split(strings.TrimSpace(req.Backends), "\n")
+	var upstreams []map[string]interface{}
+	
+	for _, line := range backendLines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			upstreams = append(upstreams, map[string]interface{}{
+				"dial": line,
+			})
+		}
+	}
+
+	if len(upstreams) == 0 {
+		return fmt.Errorf("at least one backend is required")
+	}
+
+    // Build typed handler and route (Caddy Automatic HTTPS handles redirects)
+    handler := Handle{Handler: "reverse_proxy", Upstreams: make([]Upstream, 0, len(upstreams))}
+    for _, u := range upstreams {
+        handler.Upstreams = append(handler.Upstreams, Upstream{Dial: u["dial"].(string)})
+    }
+    if req.Method != "random" && req.Method != "" {
+        sp := &SelectionPolicy{Policy: req.Method}
+        if (req.Method == "header" || req.Method == "cookie") && req.HashKey != "" {
+            if req.Method == "header" {
+                sp.Header = req.HashKey
+            } else {
+                sp.Cookie = req.HashKey
+            }
+        }
+        handler.LoadBalancing = &LoadBalancing{SelectionPolicy: sp}
+    }
+    route := CaddyRoute{
+        Match:  []Match{{Host: []string{req.Domain}}},
+        Handle: []Handle{handler},
+    }
+
+    routeJSON, err := json.Marshal(route)
+    if err != nil {
+        return fmt.Errorf("failed to marshal route: %w", err)
+    }
+    if _, err := app.callCaddyAPI("POST", "/config/apps/http/servers/main/routes", routeJSON); err != nil {
+        return fmt.Errorf("failed to add route: %w", err)
+    }
+
+	// Save configuration to make it persistent
+	if err := app.saveConfig(); err != nil {
+		app.logger.Warn("Failed to save config", "error", err)
+	}
+
+    // Log the creation
+    app.logger.Info("Load balancer created",
+        "domain", req.Domain,
+        "method", req.Method,
+        "backends", len(upstreams))
+
+	return nil
+}
+
+// Find route index by domain - simplified
+func (app *Application) deleteLoadBalancer(domain string) error {
+    routes, err := app.getCaddyRoutes()
+    if err != nil {
+        return err
+    }
+
+    var indices []int
+    for i, route := range routes {
+        if len(route.Match) > 0 && len(route.Match[0].Host) > 0 && route.Match[0].Host[0] == domain {
+            indices = append(indices, i)
+        }
+    }
+    if len(indices) == 0 {
+        return fmt.Errorf("load balancer not found")
+    }
+
+    sort.Sort(sort.Reverse(sort.IntSlice(indices)))
+    for _, idx := range indices {
+        if _, err := app.callCaddyAPI("DELETE", fmt.Sprintf("/config/apps/http/servers/main/routes/%d", idx), nil); err != nil {
+            return fmt.Errorf("failed to delete route %d: %w", idx, err)
+        }
+    }
+
+    if err := app.saveConfig(); err != nil {
+        app.logger.Warn("Failed to save config after deletion", "error", err)
+    }
+    return nil
+}
+
+// saveConfig saves the current Caddy configuration to disk for persistence
+func (app *Application) saveConfig() error {
+    // Snapshot current Caddy config and write to a fixed path
+    resp, err := app.callCaddyAPI("GET", "/config/", nil)
+    if err != nil {
+        return fmt.Errorf("failed to get current config: %w", err)
+    }
+    // Pretty print JSON for readability
+    var cfg any
+    if err := json.Unmarshal(resp, &cfg); err != nil {
+        return fmt.Errorf("failed to unmarshal config: %w", err)
+    }
+    formatted, err := json.MarshalIndent(cfg, "", "  ")
+    if err != nil {
+        return fmt.Errorf("failed to format config: %w", err)
+    }
+    if err := os.MkdirAll("/app/data/caddy/config", 0755); err != nil {
+        return fmt.Errorf("failed to create config dir: %w", err)
+    }
+    if err := os.WriteFile("/app/data/caddy/config/caddy.json", formatted, 0644); err != nil {
+        return fmt.Errorf("failed to write config snapshot: %w", err)
+    }
+    app.logger.Info("Configuration snapshot saved", "path", "/app/data/caddy/config/caddy.json")
+    return nil
+}
+
+// loadSavedConfig loads the saved Caddy configuration from disk
+func (app *Application) loadSavedConfig() (map[string]interface{}, error) {
+    configPath := "/app/data/caddy/config/caddy.json"
+    
+    // Check if config file exists
+    if _, err := os.Stat(configPath); os.IsNotExist(err) {
+        return nil, fmt.Errorf("no saved config found")
+    }
+
+    // Read config file
+    configData, err := os.ReadFile(configPath)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read config file: %w", err)
+    }
+
+    // Parse JSON
+    var config map[string]interface{}
+    if err := json.Unmarshal(configData, &config); err != nil {
+        return nil, fmt.Errorf("failed to parse config JSON: %w", err)
+    }
+
+    app.logger.Info("Loaded saved configuration from disk", "path", configPath)
+    return config, nil
+}
+
+
+// Middleware
+func (app *Application) AuthRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		session, _ := store.Get(c.Request, "session")
+		session, err := app.store.Get(c.Request, SessionName)
+		if err != nil {
+			app.logger.Error("Failed to get session", "error", err)
+			c.Redirect(http.StatusSeeOther, "/")
+			c.Abort()
+			return
+		}
+
 		if auth, ok := session.Values["authenticated"].(bool); !ok || !auth {
 			c.Redirect(http.StatusSeeOther, "/")
 			c.Abort()
@@ -220,844 +503,526 @@ func authRequired() gin.HandlerFunc {
 	}
 }
 
-func showLogin(c *gin.Context) {
+func (app *Application) SecurityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+        // HSTS only for HTTPS
+        if c.Request.TLS != nil {
+            c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        }
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Next()
+	}
+}
+
+// HTTP Handlers
+func (app *Application) ShowLogin(c *gin.Context) {
 	c.HTML(http.StatusOK, "login.html", nil)
 }
 
-func handleLogin(c *gin.Context) {
-	username := c.PostForm("username")
+func (app *Application) HandleLogin(c *gin.Context) {
+	username := strings.TrimSpace(c.PostForm("username"))
 	password := c.PostForm("password")
-	
-	expectedUser := os.Getenv("ADMIN_USERNAME")
-	expectedPass := os.Getenv("ADMIN_PASSWORD")
-	
-	if expectedUser == "" {
-		expectedUser = "admin"
-	}
-	if expectedPass == "" {
-		expectedPass = "password"
-	}
-	
+
+	expectedUser := getEnv("ADMIN_USERNAME", DefaultAdminUsername)
+	expectedPass := getEnv("ADMIN_PASSWORD", DefaultAdminPassword)
+
 	if username == expectedUser && password == expectedPass {
-		session, _ := store.Get(c.Request, "session")
+		session, err := app.store.Get(c.Request, SessionName)
+		if err != nil {
+			app.logger.Error("Failed to get session", "error", err)
+			c.HTML(http.StatusInternalServerError, "login.html", gin.H{"error": "Session error"})
+			return
+		}
+
 		session.Values["authenticated"] = true
-		session.Save(c.Request, c.Writer)
+		if err := session.Save(c.Request, c.Writer); err != nil {
+			app.logger.Error("Failed to save session", "error", err)
+			c.HTML(http.StatusInternalServerError, "login.html", gin.H{"error": "Session error"})
+			return
+		}
+
 		c.Redirect(http.StatusSeeOther, "/dashboard")
 	} else {
+		app.logger.Warn("Failed login attempt", "username", username, "ip", c.ClientIP())
 		c.HTML(http.StatusUnauthorized, "login.html", gin.H{"error": "Invalid credentials"})
 	}
 }
 
-func showDashboard(c *gin.Context) {
-	c.HTML(http.StatusOK, "dashboard.html", gin.H{"config": config})
+func (app *Application) ShowDashboard(c *gin.Context) {
+	loadBalancers, err := app.getLoadBalancers()
+	if err != nil {
+		app.logger.Error("Failed to get load balancers", "error", err)
+		loadBalancers = []map[string]interface{}{}
+	}
+
+	c.HTML(http.StatusOK, "dashboard.html", gin.H{"loadBalancers": loadBalancers})
 }
 
-func addLoadBalancer(c *gin.Context) {
-	domain := c.PostForm("domain")
-	protocol := c.DefaultPostForm("protocol", "http")
-	sslEmail := c.PostForm("ssl_email")
-	upstreamsStr := c.PostForm("upstreams")
-	
-	// Validate HTTPS requirements
-	if protocol == "https" && sslEmail == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Email address is required for HTTPS/Let's Encrypt certificates",
-			"suggestion": "Please provide a valid email address for certificate notifications",
-		})
+func (app *Application) AddLoadBalancer(c *gin.Context) {
+	req := LoadBalancerRequest{
+		Domain:   strings.TrimSpace(c.PostForm("domain")),
+		Backends: strings.TrimSpace(c.PostForm("backends")),
+		Method:   c.DefaultPostForm("method", "random"),
+		HashKey:  strings.TrimSpace(c.PostForm("hash_key")),
+	}
+
+	// Basic validation
+	if req.Domain == "" || !strings.Contains(req.Domain, ".") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid domain"})
 		return
 	}
-	
-	// Advanced configuration with defaults
-	lbConfig := getDefaultLoadBalancerConfig()
-	
-	// Override defaults with form values if provided
-	if method := c.PostForm("method"); method != "" {
-		if method == "round_robin" || method == "least_conn" || method == "ip_hash" || method == "hash" {
-			lbConfig.Method = method
-		}
-	}
-	if hashKey := c.PostForm("hash_key"); hashKey != "" {
-		lbConfig.HashKey = hashKey
-	}
-	if c.PostForm("enable_cache") == "on" {
-		lbConfig.EnableCache = true
-	}
-	if cacheTime := c.PostForm("cache_time"); cacheTime != "" {
-		lbConfig.CacheTime = cacheTime
-	}
-	if c.PostForm("session_sticky") == "on" {
-		lbConfig.SessionSticky = true
-		lbConfig.Method = "ip_hash" // Force ip_hash for session persistence
-	}
-	
-	// Validate protocol
-	if protocol != "http" && protocol != "https" {
-		protocol = "http"
-	}
-	
-	var upstreams []Upstream
-	for _, upstream := range strings.Split(upstreamsStr, "\n") {
-		upstream = strings.TrimSpace(upstream)
-		if upstream != "" {
-			parts := strings.Split(upstream, ":")
-			if len(parts) >= 2 {
-				host := strings.TrimSpace(parts[0])
-				port := strings.TrimSpace(parts[1])
-				
-				// Create upstream with defaults
-				us := getDefaultUpstream(host, port)
-				
-				// Check for weight, max_fails, fail_timeout in format: host:port:weight:max_fails:fail_timeout
-				if len(parts) >= 3 {
-					if weight := strings.TrimSpace(parts[2]); weight != "" && weight != "0" {
-						if w := parseIntDefault(weight, 1); w > 0 && w <= 100 {
-							us.Weight = w
-						}
-					}
-				}
-				if len(parts) >= 4 {
-					if maxFails := strings.TrimSpace(parts[3]); maxFails != "" {
-						if mf := parseIntDefault(maxFails, 3); mf > 0 {
-							us.MaxFails = mf
-						}
-					}
-				}
-				if len(parts) >= 5 {
-					if failTimeout := strings.TrimSpace(parts[4]); failTimeout != "" {
-						us.FailTimeout = failTimeout
-					}
-				}
-				
-				upstreams = append(upstreams, us)
-			}
-		}
-	}
-	
-	lb := LoadBalancer{
-		Domain:    domain,
-		Protocol:  protocol,
-		SSLEmail:  sslEmail,
-		Upstreams: upstreams,
-		Config:    lbConfig,
-		SSLStatus: "pending", // Will be updated after certificate generation
-	}
-	
-	
-	for i, existing := range config.LoadBalancers {
-		if existing.Domain == domain {
-			config.LoadBalancers[i] = lb
-			goto save
-		}
-	}
-	
-	config.LoadBalancers = append(config.LoadBalancers, lb)
-	
-save:
-	if err := saveConfig(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+
+	if req.Backends == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one backend required"})
 		return
 	}
-	
-	// Generate initial nginx config (may use dummy certs for HTTPS)
-	generateNginxConfig()
-	
-	// If HTTPS, request Let's Encrypt certificate in background
-	if protocol == "https" && sslEmail != "" {
-		go func() {
-			log.Printf("Requesting Let's Encrypt certificate for %s", domain)
-			
-			// Update SSL status to indicate processing
-			for i, existing := range config.LoadBalancers {
-				if existing.Domain == domain {
-					config.LoadBalancers[i].SSLStatus = "requesting"
-					saveConfig()
-					break
-				}
-			}
-			
-			// Request certificate
-			if err := requestLetsEncryptCertificate(domain, sslEmail); err != nil {
-				log.Printf("Failed to obtain Let's Encrypt certificate for %s: %v", domain, err)
-				// Update status to failed
-				for i, existing := range config.LoadBalancers {
-					if existing.Domain == domain {
-						config.LoadBalancers[i].SSLStatus = "failed"
-						saveConfig()
-						break
-					}
-				}
-			} else {
-				log.Printf("Successfully obtained Let's Encrypt certificate for %s", domain)
-				// Update status to active and regenerate nginx config
-				for i, existing := range config.LoadBalancers {
-					if existing.Domain == domain {
-						config.LoadBalancers[i].SSLStatus = "active"
-						saveConfig()
-						generateNginxConfig()
-						
-						// Reload nginx with new certificate
-						reloadCmd := exec.Command("nginx", "-s", "reload")
-						if err := reloadCmd.Run(); err != nil {
-							log.Printf("Failed to reload nginx after certificate installation: %v", err)
-						}
-						break
-					}
-				}
-			}
-		}()
+
+	if err := app.createLoadBalancer(req); err != nil {
+		app.logger.Error("Failed to create load balancer", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create load balancer"})
+		return
 	}
-	
+
+    app.logger.Info("Created load balancer", "domain", req.Domain)
 	c.Redirect(http.StatusSeeOther, "/dashboard")
 }
 
-func getLoadBalancer(c *gin.Context) {
-	domain := c.Param("domain")
-	
-	for _, lb := range config.LoadBalancers {
-		if lb.Domain == domain {
-			c.JSON(http.StatusOK, lb)
-			return
-		}
-	}
-	
-	c.JSON(http.StatusNotFound, gin.H{"error": "Load balancer not found"})
-}
-
-func editLoadBalancer(c *gin.Context) {
-	domain := c.Param("domain")
-	newDomain := c.PostForm("domain")
-	protocol := c.DefaultPostForm("protocol", "http")
-	sslEmail := c.PostForm("ssl_email")
-	upstreamsStr := c.PostForm("upstreams")
-	
-	// Validate HTTPS requirements
-	if protocol == "https" && sslEmail == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Email address is required for HTTPS/Let's Encrypt certificates",
-			"suggestion": "Please provide a valid email address for certificate notifications",
-		})
-		return
-	}
-	
-	// Get existing config or use defaults
-	var existingConfig LoadBalancerConfig
-	for _, lb := range config.LoadBalancers {
-		if lb.Domain == domain {
-			existingConfig = lb.Config
-			break
-		}
-	}
-	if existingConfig.Method == "" {
-		existingConfig = getDefaultLoadBalancerConfig()
-	}
-	
-	// Advanced configuration - use existing values as defaults
-	lbConfig := existingConfig
-	
-	// Override with form values if provided
-	if method := c.PostForm("method"); method != "" {
-		if method == "round_robin" || method == "least_conn" || method == "ip_hash" || method == "hash" {
-			lbConfig.Method = method
-		}
-	}
-	if hashKey := c.PostForm("hash_key"); hashKey != "" {
-		lbConfig.HashKey = hashKey
-	}
-	lbConfig.EnableCache = c.PostForm("enable_cache") == "on"
-	if cacheTime := c.PostForm("cache_time"); cacheTime != "" {
-		lbConfig.CacheTime = cacheTime
-	}
-	if c.PostForm("session_sticky") == "on" {
-		lbConfig.SessionSticky = true
-		lbConfig.Method = "ip_hash" // Force ip_hash for session persistence
-	} else {
-		lbConfig.SessionSticky = false
-	}
-	
-	// Validate protocol
-	if protocol != "http" && protocol != "https" {
-		protocol = "http"
-	}
-	
-	var upstreams []Upstream
-	for _, upstream := range strings.Split(upstreamsStr, "\n") {
-		upstream = strings.TrimSpace(upstream)
-		if upstream != "" {
-			parts := strings.Split(upstream, ":")
-			if len(parts) >= 2 {
-				host := strings.TrimSpace(parts[0])
-				port := strings.TrimSpace(parts[1])
-				
-				// Create upstream with defaults
-				us := getDefaultUpstream(host, port)
-				
-				// Check for weight, max_fails, fail_timeout in format: host:port:weight:max_fails:fail_timeout
-				if len(parts) >= 3 {
-					if weight := strings.TrimSpace(parts[2]); weight != "" && weight != "0" {
-						if w := parseIntDefault(weight, 1); w > 0 && w <= 100 {
-							us.Weight = w
-						}
-					}
-				}
-				if len(parts) >= 4 {
-					if maxFails := strings.TrimSpace(parts[3]); maxFails != "" {
-						if mf := parseIntDefault(maxFails, 3); mf > 0 {
-							us.MaxFails = mf
-						}
-					}
-				}
-				if len(parts) >= 5 {
-					if failTimeout := strings.TrimSpace(parts[4]); failTimeout != "" {
-						us.FailTimeout = failTimeout
-					}
-				}
-				
-				upstreams = append(upstreams, us)
-			}
-		}
-	}
-	
-	for i, lb := range config.LoadBalancers {
-		if lb.Domain == domain {
-			// Preserve existing SSL status if not changing to HTTPS or domain is same
-			sslStatus := lb.SSLStatus
-			if protocol == "https" && (newDomain != domain || sslEmail != lb.SSLEmail) {
-				sslStatus = "pending" // Will need new certificate
-			}
-			
-			config.LoadBalancers[i] = LoadBalancer{
-				Domain:    newDomain,
-				Protocol:  protocol,
-				SSLEmail:  sslEmail,
-				Upstreams: upstreams,
-				Config:    lbConfig,
-				SSLStatus: sslStatus,
-			}
-			
-			if err := saveConfig(); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-			
-			generateNginxConfig()
-			
-			// If HTTPS and needs new certificate, request it in background
-			if protocol == "https" && sslStatus == "pending" && sslEmail != "" {
-				go func() {
-					log.Printf("Requesting Let's Encrypt certificate for %s (edit)", newDomain)
-					
-					// Update SSL status to indicate processing
-					for j, existing := range config.LoadBalancers {
-						if existing.Domain == newDomain {
-							config.LoadBalancers[j].SSLStatus = "requesting"
-							saveConfig()
-							break
-						}
-					}
-					
-					// Request certificate
-					if err := requestLetsEncryptCertificate(newDomain, sslEmail); err != nil {
-						log.Printf("Failed to obtain Let's Encrypt certificate for %s: %v", newDomain, err)
-						// Update status to failed
-						for j, existing := range config.LoadBalancers {
-							if existing.Domain == newDomain {
-								config.LoadBalancers[j].SSLStatus = "failed"
-								saveConfig()
-								break
-							}
-						}
-					} else {
-						log.Printf("Successfully obtained Let's Encrypt certificate for %s", newDomain)
-						// Update status to active and regenerate nginx config
-						for j, existing := range config.LoadBalancers {
-							if existing.Domain == newDomain {
-								config.LoadBalancers[j].SSLStatus = "active"
-								saveConfig()
-								generateNginxConfig()
-								
-								// Reload nginx with new certificate
-								reloadCmd := exec.Command("nginx", "-s", "reload")
-								if err := reloadCmd.Run(); err != nil {
-									log.Printf("Failed to reload nginx after certificate installation: %v", err)
-								}
-								break
-							}
-						}
-					}
-				}()
-			}
-			
-			c.Redirect(http.StatusSeeOther, "/dashboard")
-			return
-		}
-	}
-	
-	c.JSON(http.StatusNotFound, gin.H{"error": "Load balancer not found"})
-}
-
-func deleteLoadBalancer(c *gin.Context) {
-	domain := c.Param("domain")
-	
-	for i, lb := range config.LoadBalancers {
-		if lb.Domain == domain {
-			config.LoadBalancers = append(config.LoadBalancers[:i], config.LoadBalancers[i+1:]...)
-			break
-		}
-	}
-	
-	saveConfig()
-	generateNginxConfig()
-	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
-}
-
-func checkNginxConfig(c *gin.Context) {
-	cmd := exec.Command("nginx", "-t")
-	output, err := cmd.CombinedOutput()
-	
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"valid": false,
-			"error": string(output),
-		})
-		return
-	}
-	
-	c.JSON(http.StatusOK, gin.H{
-		"valid": true,
-		"message": string(output),
-	})
-}
-
-func reloadNginx(c *gin.Context) {
-	// First check if config is valid
-	testCmd := exec.Command("nginx", "-t")
-	testOutput, testErr := testCmd.CombinedOutput()
-	
-	if testErr != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Nginx configuration is invalid. Please check your load balancer settings.",
-			"details": string(testOutput),
-			"fix_suggestion": "Review your domain names and upstream server addresses. Make sure all domains are valid and all upstream servers are in IP:PORT format.",
-		})
-		return
-	}
-	
-	// If config is valid, proceed with reload
-	reloadCmd := exec.Command("nginx", "-s", "reload")
-	reloadOutput, reloadErr := reloadCmd.CombinedOutput()
-	
-	if reloadErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to reload nginx",
-			"details": string(reloadOutput),
-			"suggestion": "Check nginx logs for more details",
-		})
-		return
-	}
-	
-	c.JSON(http.StatusOK, gin.H{
-		"status": "reloaded",
-		"message": "Nginx configuration reloaded successfully",
-	})
-}
-
-func getNginxLogs(c *gin.Context) {
-	logType := c.DefaultQuery("type", "error")
-	lines := c.DefaultQuery("lines", "50")
-	
-	var logFile string
-	switch logType {
-	case "access":
-		logFile = "/app/data/logs/nginx-access.log"
-	case "error":
-		logFile = "/app/data/logs/nginx-error.log"
-	case "app":
-		logFile = "/app/data/logs/app-error.log"
-	case "app-access":
-		logFile = "/app/data/logs/app-access.log"
-	case "letsencrypt":
-		logFile = "/app/data/logs/letsencrypt.log"
-	default:
-		logFile = "/app/data/logs/nginx-error.log"
-	}
-	
-	cmd := exec.Command("tail", "-n", lines, logFile)
-	output, err := cmd.Output()
-	
-	if err != nil {
-		// Try fallbacks for different log types
-		switch logType {
-		case "error":
-			// Try supervisor logs as fallback for nginx errors
-			supervisorLog := "/var/log/supervisor/supervisord.log"
-			cmd = exec.Command("grep", "nginx", supervisorLog)
-			if fallbackOutput, fallbackErr := cmd.Output(); fallbackErr == nil {
-				output = fallbackOutput
-				err = nil
-			}
-		case "letsencrypt":
-			// If Let's Encrypt log doesn't exist, return helpful message
-			output = []byte("No Let's Encrypt logs found. This usually means no HTTPS certificates have been requested yet.\n\nTo generate logs:\n1. Create an HTTPS load balancer\n2. Ensure domain points to this server\n3. Wait for certificate generation to complete")
-			err = nil
-		case "app", "app-access":
-			// If app logs don't exist, return helpful message
-			output = []byte("Application logs not found. This might indicate the application just started.\n\nTry refreshing in a few moments or check container startup logs.")
-			err = nil
-		}
-	}
-	
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to read nginx logs",
-			"details": err.Error(),
-			"suggestion": "Logs might be redirected to supervisor. Check container logs with 'docker logs'.",
-		})
-		return
-	}
-	
-	c.JSON(http.StatusOK, gin.H{
-		"logs": string(output),
-		"type": logType,
-		"lines": lines,
-	})
-}
-
-func getConfig(c *gin.Context) {
-	configPath := "/app/data/nginx/loadbalancer.conf"
-	
-	content, err := ioutil.ReadFile(configPath)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"content": "# No load balancer configuration found\n# Add load balancers through the UI to generate configuration",
-			"exists": false,
-		})
-		return
-	}
-	
-	c.JSON(http.StatusOK, gin.H{
-		"content": string(content),
-		"exists": true,
-	})
-}
-
-func updateConfig(c *gin.Context) {
-	newConfig := c.PostForm("config")
-	configPath := "/app/data/nginx/loadbalancer.conf"
-	
-	// Create backup before updating
-	if _, err := os.Stat(configPath); err == nil {
-		backupPath := configPath + ".backup." + strings.ReplaceAll(strings.ReplaceAll(os.Getenv("NGINX_PORT"), ":", "-"), " ", "_")
-		if backupData, backupErr := ioutil.ReadFile(configPath); backupErr == nil {
-			ioutil.WriteFile(backupPath, backupData, 0644)
-		}
-	}
-	
-	// Write new config
-	err := ioutil.WriteFile(configPath, []byte(newConfig), 0644)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to write configuration file",
-			"details": err.Error(),
-		})
-		return
-	}
-	
-	// Test the new configuration
-	testCmd := exec.Command("nginx", "-t")
-	testOutput, testErr := testCmd.CombinedOutput()
-	
-	if testErr != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid nginx configuration",
-			"details": string(testOutput),
-			"suggestion": "Check your configuration syntax. The file has been saved but nginx will not reload with invalid configuration.",
-		})
-		return
-	}
-	
-	c.JSON(http.StatusOK, gin.H{
-		"status": "saved",
-		"message": "Configuration saved and validated successfully",
-		"test_output": string(testOutput),
-	})
-}
-
-func backupConfig(c *gin.Context) {
-	configPath := "/app/data/nginx/loadbalancer.conf"
-	
-	content, err := ioutil.ReadFile(configPath)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": "Configuration file not found",
-		})
-		return
-	}
-	
-	filename := "loadbalancer-" + strings.ReplaceAll(strings.ReplaceAll(os.Getenv("NGINX_PORT"), ":", "-"), " ", "_") + ".conf"
-	
-	c.Header("Content-Disposition", "attachment; filename="+filename)
-	c.Header("Content-Type", "text/plain")
-	c.String(http.StatusOK, string(content))
-}
-
-func retryCertificate(c *gin.Context) {
+func (app *Application) GetLoadBalancer(c *gin.Context) {
 	domain := c.Param("domain")
 	
 	// Find the load balancer
-	var lb *LoadBalancer
-	for i, existing := range config.LoadBalancers {
-		if existing.Domain == domain {
-			lb = &config.LoadBalancers[i]
-			break
+	loadBalancers, err := app.getLoadBalancers()
+	if err != nil {
+		app.logger.Error("Failed to get load balancers", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get load balancers"})
+		return
+	}
+
+	for _, lb := range loadBalancers {
+		if lbDomain, ok := lb["domain"].(string); ok && lbDomain == domain {
+			// Convert backends array to string
+			backends := []string{}
+			if backendsArray, ok := lb["backends"].([]string); ok {
+				backends = backendsArray
+			}
+			
+			response := map[string]interface{}{
+				"domain":   lb["domain"],
+				"method":   lb["method"],
+				"backends": strings.Join(backends, "\n"),
+			}
+			
+			c.JSON(http.StatusOK, response)
+			return
 		}
 	}
 	
-	if lb == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Load balancer not found"})
-		return
-	}
-	
-	if lb.Protocol != "https" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Load balancer is not configured for HTTPS"})
-		return
-	}
-	
-	if lb.SSLEmail == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No email configured for SSL certificate"})
-		return
-	}
-	
-	// Update status to pending and save
-	lb.SSLStatus = "pending"
-	if err := saveConfig(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
-		return
-	}
-	
-	log.Printf("Retrying Let's Encrypt certificate for domain: %s", domain)
-	
-	// Start certificate generation in background
-	go func() {
-		log.Printf("Requesting Let's Encrypt certificate for %s (retry)", domain)
-		
-		// Update SSL status to indicate processing
-		for i, existing := range config.LoadBalancers {
-			if existing.Domain == domain {
-				config.LoadBalancers[i].SSLStatus = "requesting"
-				saveConfig()
-				break
-			}
-		}
-		
-		// Request certificate
-		if err := requestLetsEncryptCertificate(domain, lb.SSLEmail); err != nil {
-			log.Printf("Failed to obtain Let's Encrypt certificate for %s (retry): %v", domain, err)
-			// Update status to failed
-			for i, existing := range config.LoadBalancers {
-				if existing.Domain == domain {
-					config.LoadBalancers[i].SSLStatus = "failed"
-					saveConfig()
-					break
-				}
-			}
-		} else {
-			log.Printf("Successfully obtained Let's Encrypt certificate for %s (retry)", domain)
-			// Update status to active and regenerate nginx config
-			for i, existing := range config.LoadBalancers {
-				if existing.Domain == domain {
-					config.LoadBalancers[i].SSLStatus = "active"
-					saveConfig()
-					generateNginxConfig()
-					
-					// Reload nginx with new certificate
-					reloadCmd := exec.Command("nginx", "-s", "reload")
-					if err := reloadCmd.Run(); err != nil {
-						log.Printf("Failed to reload nginx after certificate installation (retry): %v", err)
-					}
-					break
-				}
-			}
-		}
-	}()
-	
-	c.JSON(http.StatusOK, gin.H{
-		"status": "started",
-		"message": "Certificate retry started in background",
-		"domain": domain,
-	})
+	c.JSON(http.StatusNotFound, gin.H{"error": "Load balancer not found"})
 }
 
-func handleLogout(c *gin.Context) {
-	session, _ := store.Get(c.Request, "session")
-	session.Values["authenticated"] = false
-	session.Save(c.Request, c.Writer)
+func (app *Application) UpdateLoadBalancer(c *gin.Context) {
+	domain := c.Param("domain")
+	
+	req := LoadBalancerRequest{
+		Domain:   strings.TrimSpace(c.PostForm("domain")),
+		Backends: strings.TrimSpace(c.PostForm("backends")),
+		Method:   c.DefaultPostForm("method", "random"),
+		HashKey:  strings.TrimSpace(c.PostForm("hash_key")),
+	}
+
+	// Basic validation
+	if req.Domain == "" || req.Backends == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Domain and backends required"})
+		return
+	}
+
+	// Replace: delete old, create new
+	if err := app.deleteLoadBalancer(domain); err != nil {
+		app.logger.Error("Delete failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Update failed"})
+		return
+	}
+
+	if err := app.createLoadBalancer(req); err != nil {
+		app.logger.Error("Create failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Update failed"})
+		return
+	}
+
+	app.logger.Info("Updated load balancer", "domain", req.Domain)
+	c.Redirect(http.StatusSeeOther, "/dashboard")
+}
+
+func (app *Application) DeleteLoadBalancer(c *gin.Context) {
+	domain := c.Param("domain")
+	
+	if err := app.deleteLoadBalancer(domain); err != nil {
+		app.logger.Error("Failed to delete load balancer", "error", err, "domain", domain)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to delete load balancer: %v", err)})
+		return
+	}
+
+	app.logger.Info("Deleted load balancer", "domain", domain)
+	c.Redirect(http.StatusSeeOther, "/dashboard")
+}
+
+func (app *Application) HandleLogout(c *gin.Context) {
+	session, err := app.store.Get(c.Request, SessionName)
+	if err != nil {
+		app.logger.Error("Failed to get session during logout", "error", err)
+	} else {
+		session.Values["authenticated"] = false
+		session.Save(c.Request, c.Writer)
+	}
 	c.Redirect(http.StatusSeeOther, "/")
 }
 
-func generateNginxConfig() {
-	tmpl := `
-{{range .LoadBalancers}}
-# Load balancing method: {{.Config.Method}}{{if .Config.SessionSticky}} (Session Sticky){{end}}
-upstream {{.Domain | sanitize}}_backend {
-    {{if eq .Config.Method "least_conn"}}least_conn;{{end}}
-    {{if eq .Config.Method "ip_hash"}}ip_hash;{{end}}
-    {{if eq .Config.Method "hash"}}hash {{.Config.HashKey}} consistent;{{end}}
-    
-    {{range .Upstreams}}
-    server {{.Host}}:{{.Port}}{{if ne .Weight 1}} weight={{.Weight}}{{end}}{{if ne .MaxFails 3}} max_fails={{.MaxFails}}{{end}}{{if ne .FailTimeout "10s"}} fail_timeout={{.FailTimeout}}{{end}};
-    {{end}}
-}
-
-{{if .Config.EnableCache}}
-# Proxy cache configuration for {{.Domain}}
-proxy_cache_path /tmp/cache/{{.Domain | sanitize}} levels=1:2 keys_zone={{.Domain | sanitize}}_cache:10m max_size=100m inactive={{.Config.CacheTime}};
-{{end}}
-
-server {
-    {{if eq .Protocol "https"}}
-    listen 443 ssl;
-    {{else}}
-    listen 80;
-    {{end}}
-    server_name {{.Domain}};
-
-    {{if eq .Protocol "https"}}
-    # SSL configuration
-    {{if eq .SSLStatus "active"}}
-    # Let's Encrypt certificates
-    ssl_certificate /app/data/letsencrypt/live/{{.Domain}}/fullchain.pem;
-    ssl_certificate_key /app/data/letsencrypt/live/{{.Domain}}/privkey.pem;
-    {{else}}
-    # Fallback to dummy certificate (development/pending)
-    ssl_certificate /etc/nginx/ssl/dummy.crt;
-    ssl_certificate_key /etc/nginx/ssl/dummy.key;
-    {{end}}
-    
-    # SSL security settings
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_timeout 10m;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_tickets off;
-    ssl_stapling on;
-    ssl_stapling_verify on;
-    {{end}}
-
-    # ACME challenge location for Let's Encrypt
-    location /.well-known/acme-challenge/ {
-        root /app/data/certbot;
-        try_files $uri =404;
-    }
-
-    location / {
-        proxy_pass http://{{.Domain | sanitize}}_backend;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        {{if eq .Protocol "https"}}
-        proxy_set_header X-Forwarded-Proto https;
-        {{else}}
-        proxy_set_header X-Forwarded-Proto http;
-        {{end}}
-        
-        {{if .Config.EnableCache}}
-        # Caching configuration
-        proxy_cache {{.Domain | sanitize}}_cache;
-        proxy_cache_valid 200 302 {{.Config.CacheTime}};
-        proxy_cache_valid 404 1m;
-        proxy_cache_use_stale error timeout invalid_header updating http_500 http_502 http_503 http_504;
-        proxy_cache_revalidate on;
-        proxy_cache_lock on;
-        add_header X-Cache-Status $upstream_cache_status;
-        {{end}}
-        
-        # Timeouts and buffers
-        proxy_connect_timeout 30s;
-        proxy_send_timeout 30s;
-        proxy_read_timeout 30s;
-        proxy_buffering on;
-        proxy_buffer_size 128k;
-        proxy_buffers 4 256k;
-        proxy_busy_buffers_size 256k;
-    }
-}
-
-{{if eq .Protocol "https"}}
-# HTTP to HTTPS redirect
-server {
-    listen 80;
-    server_name {{.Domain}};
-    
-    # ACME challenge location for Let's Encrypt (must be served over HTTP)
-    location /.well-known/acme-challenge/ {
-        root /app/data/certbot;
-        try_files $uri =404;
-    }
-    
-    # Redirect all other requests to HTTPS
-    location / {
-        return 301 https://$server_name$request_uri;
-    }
-}
-{{end}}
-{{end}}
-`
-
-	funcMap := template.FuncMap{
-		"replace": strings.ReplaceAll,
-		"sanitize": func(domain string) string {
-			// Replace dots with underscores and remove any invalid characters
-			sanitized := strings.ReplaceAll(domain, ".", "_")
-			sanitized = strings.ReplaceAll(sanitized, "-", "_")
-			// Remove any non-alphanumeric characters except underscores
-			result := ""
-			for _, char := range sanitized {
-				if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' {
-					result += string(char)
-				}
-			}
-			// Ensure it doesn't start with a number
-			if len(result) > 0 && result[0] >= '0' && result[0] <= '9' {
-				result = "lb_" + result
-			}
-			// Handle empty result
-			if result == "" {
-				result = "default_lb"
-			}
-			return result
-		},
-	}
-
-	t, err := template.New("nginx").Funcs(funcMap).Parse(tmpl)
-	if err != nil {
-		log.Printf("Template error: %v", err)
-		return
-	}
-
-	os.MkdirAll("/app/data/nginx", 0755)
+func (app *Application) ShowLogs(c *gin.Context) {
+	logType := c.DefaultQuery("type", "app")
 	
-	// Create cache directories for load balancers with caching enabled
-	for _, lb := range config.LoadBalancers {
-		if lb.Config.EnableCache {
-			cacheDir := "/tmp/cache"
-			if err := os.MkdirAll(cacheDir, 0755); err != nil {
-				log.Printf("Failed to create cache directory %s: %v", cacheDir, err)
-			} else {
-				log.Printf("Created cache directory: %s", cacheDir)
-			}
+	var logs string
+	var logName string
+	
+	switch logType {
+	case "app":
+		logName = "Application Logs"
+		// Show recent application activity and instructions
+		logs = app.getApplicationLogs()
+	case "caddy":
+		logName = "Caddy Access Logs" 
+		logs = app.getCaddyLogs("access")
+	case "caddy-error":
+		logName = "Caddy Error Logs"
+		logs = app.getCaddyLogs("error")
+	default:
+		logName = "Application Logs"
+		logs = app.getApplicationLogs()
+	}
+	
+	c.HTML(http.StatusOK, "logs.html", gin.H{
+		"logs":     logs,
+		"logName":  logName,
+		"logType":  logType,
+	})
+}
+
+func (app *Application) getApplicationLogs() string {
+	// Try to read from multiple possible log sources
+	logSources := []string{
+		"/app/data/logs/simplelb/app.log",
+		"/app/data/logs/simplelb/app-stdout.log",
+		"/app/data/logs/simplelb/app-stderr.log",
+	}
+	
+	for _, logFile := range logSources {
+		if logs, err := app.getTailLogs(logFile, 1000); err == nil {
+			return logs
 		}
 	}
 	
-	file, err := os.Create("/app/data/nginx/loadbalancer.conf")
-	if err != nil {
-		log.Printf("File creation error: %v", err)
-		return
-	}
-	defer file.Close()
+	// If no log files found, return basic info with instructions
+	return fmt.Sprintf(`=== APPLICATION LOGS ===
 
-	err = t.Execute(file, config)
+No application log file found at standard locations:
+%s
+
+Current Status:
+- SimpleLB Management Interface: Running on port %s
+- Session Store: Active
+- Time: %s
+
+To enable file logging, set up log output in the application or use:
+docker logs --tail 1000 -f <container-name>
+
+Load Balancers Status:
+%s`, 
+		strings.Join(logSources, "\n"), 
+		getEnv("MANAGEMENT_PORT", DefaultManagementPort),
+		time.Now().Format("2006-01-02 15:04:05"),
+		app.getLoadBalancerStatus())
+}
+
+func (app *Application) getLoadBalancerStatus() string {
+	loadBalancers, err := app.getLoadBalancers()
 	if err != nil {
-		log.Printf("Template execution error: %v", err)
+		return "- Error retrieving load balancers"
 	}
+	
+	if len(loadBalancers) == 0 {
+		return "- No load balancers configured"
+	}
+	
+	var status []string
+	for _, lb := range loadBalancers {
+		if domain, ok := lb["domain"].(string); ok {
+            status = append(status, fmt.Sprintf("- %s", domain))
+		}
+	}
+	return strings.Join(status, "\n")
+}
+
+func (app *Application) getCaddyLogs(logType string) string {
+	logFiles := map[string][]string{
+		"access": {"/app/data/logs/caddy/access.log", "/app/data/logs/caddy/caddy-stdout.log"},
+		"error":  {"/app/data/logs/caddy/error.log", "/app/data/logs/caddy/caddy-stderr.log"},
+	}
+	
+	files := logFiles[logType]
+	if files == nil {
+		files = logFiles["error"]
+	}
+	
+	for _, logFile := range files {
+		if logs, err := app.getTailLogs(logFile, 1000); err == nil {
+			return fmt.Sprintf("=== CADDY %s LOGS ===\nFile: %s\n\n%s", 
+				strings.ToUpper(logType), logFile, logs)
+		}
+	}
+	
+	return fmt.Sprintf("=== CADDY %s LOGS ===\n\nNo log files found at: %s\n\nConfigure Caddy logging to enable %s logs.", 
+		strings.ToUpper(logType), strings.Join(files, ", "), logType)
+}
+
+
+func (app *Application) getTailLogs(filename string, lines int) (string, error) {
+    f, err := os.Open(filename)
+    if err != nil {
+        return "", fmt.Errorf("failed to open log file: %w", err)
+    }
+    defer f.Close()
+
+    stat, err := f.Stat()
+    if err != nil {
+        return "", fmt.Errorf("failed to stat file: %w", err)
+    }
+    if stat.Size() == 0 {
+        return "Log file is empty", nil
+    }
+
+    // Read approximately the last 64KB to collect up to the requested number of lines
+    const approxBytes = 64 * 1024
+    var start int64
+    if stat.Size() > approxBytes {
+        start = stat.Size() - approxBytes
+    }
+    if _, err := f.Seek(start, 0); err != nil {
+        return "", fmt.Errorf("failed to seek: %w", err)
+    }
+    data, err := io.ReadAll(f)
+    if err != nil {
+        return "", fmt.Errorf("failed to read log file: %w", err)
+    }
+    parts := strings.Split(string(data), "\n")
+    if len(parts) > lines {
+        parts = parts[len(parts)-lines:]
+    }
+    return strings.Join(parts, "\n"), nil
+}
+
+// generateSelfSignedCert generates a self-signed certificate for the management interface
+func generateSelfSignedCert(certPath, keyPath string) error {
+    // Generate RSA private key
+    priv, err := rsa.GenerateKey(rand.Reader, 2048)
+    if err != nil {
+        return fmt.Errorf("failed to generate private key: %w", err)
+    }
+
+    // Create certificate template
+    template := x509.Certificate{
+        SerialNumber: big.NewInt(1),
+        Subject: pkix.Name{
+            Organization:  []string{"SimpleLB"},
+            Country:       []string{"US"},
+            Province:      []string{""},
+            Locality:      []string{""},
+            StreetAddress: []string{""},
+            PostalCode:    []string{""},
+        },
+        NotBefore:             time.Now(),
+        NotAfter:              time.Now().Add(365 * 24 * time.Hour), // Valid for 1 year
+        KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+        ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+        IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+        DNSNames:              []string{"localhost", "caddy-lb"},
+        BasicConstraintsValid: true,
+    }
+
+    // Create certificate
+    certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+    if err != nil {
+        return fmt.Errorf("failed to create certificate: %w", err)
+    }
+
+    // Write certificate to file
+    certOut, err := os.Create(certPath)
+    if err != nil {
+        return fmt.Errorf("failed to create cert file: %w", err)
+    }
+    defer certOut.Close()
+
+    if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+        return fmt.Errorf("failed to write certificate: %w", err)
+    }
+
+    // Write private key to file
+    keyOut, err := os.Create(keyPath)
+    if err != nil {
+        return fmt.Errorf("failed to create key file: %w", err)
+    }
+    defer keyOut.Close()
+
+    privDER, err := x509.MarshalPKCS8PrivateKey(priv)
+    if err != nil {
+        return fmt.Errorf("failed to marshal private key: %w", err)
+    }
+
+    if err := pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: privDER}); err != nil {
+        return fmt.Errorf("failed to write private key: %w", err)
+    }
+
+    return nil
+}
+
+// setupTLS sets up TLS certificates for the management interface
+func (app *Application) setupTLS() (string, string, error) {
+    certDir := "/app/data/certs"
+    certPath := filepath.Join(certDir, "server.crt")
+    keyPath := filepath.Join(certDir, "server.key")
+
+    // Create certificates directory
+    if err := os.MkdirAll(certDir, 0755); err != nil {
+        return "", "", fmt.Errorf("failed to create cert directory: %w", err)
+    }
+
+    // Check if certificates already exist and are still valid
+    if _, err := os.Stat(certPath); err == nil {
+        if _, err := os.Stat(keyPath); err == nil {
+            // Check if certificate is still valid (not expired)
+            certData, err := os.ReadFile(certPath)
+            if err == nil {
+                block, _ := pem.Decode(certData)
+                if block != nil {
+                    cert, err := x509.ParseCertificate(block.Bytes)
+                    if err == nil && time.Now().Before(cert.NotAfter) {
+                        app.logger.Info("Using existing TLS certificate", "path", certPath)
+                        return certPath, keyPath, nil
+                    }
+                }
+            }
+        }
+    }
+
+    // Generate new certificate
+    app.logger.Info("Generating new TLS certificate for management interface")
+    if err := generateSelfSignedCert(certPath, keyPath); err != nil {
+        return "", "", err
+    }
+
+    app.logger.Info("TLS certificate generated successfully", "cert", certPath, "key", keyPath)
+    return certPath, keyPath, nil
+}
+
+// Utility functions
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func main() {
+	app := NewApplication()
+
+	// Initialize/restore Caddy configuration on startup (with retry)
+	go func() {
+		// Wait a bit for Caddy to start, then try to restore config
+		time.Sleep(5 * time.Second)
+		
+		for i := 0; i < 5; i++ {
+			if err := app.initializeCaddyConfig(); err != nil {
+				app.logger.Warn("Failed to initialize Caddy config, retrying", "attempt", i+1, "error", err)
+				time.Sleep(2 * time.Second)
+			} else {
+				app.logger.Info("Caddy configuration initialized successfully on startup")
+				break
+			}
+		}
+	}()
+
+	// Set up Gin
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Logger(), gin.Recovery(), app.SecurityHeaders())
+	
+	r.LoadHTMLGlob("/app/templates/*")
+	r.Static("/static", "./static")
+
+	// Routes
+	r.GET("/", app.ShowLogin)
+	r.POST("/login", app.HandleLogin)
+	r.GET("/dashboard", app.AuthRequired(), app.ShowDashboard)
+	r.POST("/add", app.AuthRequired(), app.AddLoadBalancer)
+	r.GET("/edit/:domain", app.AuthRequired(), app.GetLoadBalancer)
+	r.POST("/edit/:domain", app.AuthRequired(), app.UpdateLoadBalancer)
+	r.POST("/delete/:domain", app.AuthRequired(), app.DeleteLoadBalancer)
+	r.GET("/logs", app.AuthRequired(), app.ShowLogs)
+	r.GET("/logout", app.HandleLogout)
+
+	// Get port
+	port := getEnv("MANAGEMENT_PORT", DefaultManagementPort)
+	
+	// Setup TLS certificates for management interface
+	certPath, keyPath, err := app.setupTLS()
+	if err != nil {
+		app.logger.Error("Failed to setup TLS", "error", err)
+		os.Exit(1)
+	}
+
+	// Create TLS configuration
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		},
+	}
+	
+	// Start server with graceful shutdown
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      r,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+		TLSConfig:    tlsConfig,
+	}
+
+	// Start HTTPS server in goroutine
+	go func() {
+		app.logger.Info("Starting HTTPS management server", "port", port, "cert", certPath)
+		if err := srv.ListenAndServeTLS(certPath, keyPath); err != nil && err != http.ErrServerClosed {
+			app.logger.Error("Failed to start HTTPS server", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Wait for interrupt signal for graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	app.logger.Info("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		app.logger.Error("Server forced to shutdown", "error", err)
+		os.Exit(1)
+	}
+
+	app.logger.Info("Server stopped")
 }
