@@ -944,6 +944,12 @@ server {
     ssl_stapling_verify on;
     {{end}}
 
+    # ACME challenge location for Let's Encrypt
+    location /.well-known/acme-challenge/ {
+        root /app/data/certbot;
+        try_files $uri =404;
+    }
+
     location / {
         proxy_pass http://{{.Domain | sanitize}}_backend;
         proxy_set_header Host $host;
@@ -982,7 +988,17 @@ server {
 server {
     listen 80;
     server_name {{.Domain}};
-    return 301 https://$server_name$request_uri;
+    
+    # ACME challenge location for Let's Encrypt (must be served over HTTP)
+    location /.well-known/acme-challenge/ {
+        root /app/data/certbot;
+        try_files $uri =404;
+    }
+    
+    # Redirect all other requests to HTTPS
+    location / {
+        return 301 https://$server_name$request_uri;
+    }
 }
 {{end}}
 {{end}}
