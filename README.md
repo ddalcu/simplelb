@@ -31,6 +31,24 @@ A lightweight, Docker-based nginx load balancer with a clean web UI for managing
 - **Comprehensive Logs**: View nginx, application, and Let's Encrypt logs
 - **Advanced Configuration**: Granular control over all load balancing options
 
+## 📸 Screenshots
+
+### Dashboard Overview
+![SimpleLB Dashboard](screenshots/dashboard.png)
+*Main dashboard showing load balancers with real-time SSL status and configuration details*
+
+### Add Load Balancer Modal
+![Add Load Balancer](screenshots/addlb.png)
+*Clean, modern interface for adding new load balancers with advanced configuration options*
+
+### System Logs Viewer
+![System Logs](screenshots/logs.png)
+*Comprehensive log viewer for nginx, application, and Let's Encrypt certificate logs*
+
+### Nginx Configuration Editor
+![Nginx Config Editor](screenshots/nginxconfig.png)
+*Direct nginx configuration editing with validation and backup capabilities*
+
 ## 🚀 Quick Start
 
 ### Using Docker Compose (Recommended)
