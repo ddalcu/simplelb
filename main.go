@@ -85,32 +85,117 @@ type CaddyRoute struct {
 }
 
 // Application holds the application state
-// Simple rate limiter for tracking per-IP rate limits
+// Simple rate limiter for tracking per-IP rate limits with cleanup
 type IPRateLimiter struct {
-	limiters map[string]*rate.Limiter
-	mu       sync.Mutex
-	rate     rate.Limit
+	limiters   map[string]*ipLimiterEntry
+	mu         sync.RWMutex
+	rate       rate.Limit
+	maxEntries int
+}
+
+type ipLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
 }
 
 // NewIPRateLimiter creates a new IP-based rate limiter
 func NewIPRateLimiter(rateLimit rate.Limit) *IPRateLimiter {
-	return &IPRateLimiter{
-		limiters: make(map[string]*rate.Limiter),
-		rate:     rateLimit,
+	rl := &IPRateLimiter{
+		limiters:   make(map[string]*ipLimiterEntry),
+		rate:       rateLimit,
+		maxEntries: 10000, // Limit to 10k IPs max
 	}
+	
+	// Start cleanup goroutine
+	go rl.cleanup()
+	
+	return rl
 }
 
 // GetLimiter returns a rate limiter for the given IP
 func (rl *IPRateLimiter) GetLimiter(ip string) *rate.Limiter {
+	rl.mu.RLock()
+	entry, exists := rl.limiters[ip]
+	if exists {
+		entry.lastSeen = time.Now()
+		rl.mu.RUnlock()
+		return entry.limiter
+	}
+	rl.mu.RUnlock()
+
+	// Need to create new limiter
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	
+	// Check again in case another goroutine created it
+	if entry, exists := rl.limiters[ip]; exists {
+		entry.lastSeen = time.Now()
+		return entry.limiter
+	}
+	
+	// Prevent memory exhaustion
+	if len(rl.limiters) >= rl.maxEntries {
+		// Remove oldest entries
+		rl.evictOldest()
+	}
 
-	limiter, exists := rl.limiters[ip]
-	if !exists {
-		limiter = rate.NewLimiter(rl.rate, 30) // Allow burst of 30 requests
-		rl.limiters[ip] = limiter
+	limiter := rate.NewLimiter(rl.rate, 30)
+	rl.limiters[ip] = &ipLimiterEntry{
+		limiter:  limiter,
+		lastSeen: time.Now(),
 	}
 	return limiter
+}
+
+// cleanup removes old unused limiters to prevent memory leaks
+func (rl *IPRateLimiter) cleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		rl.mu.Lock()
+		cutoff := time.Now().Add(-30 * time.Minute) // Remove IPs not seen for 30 minutes
+		
+		for ip, entry := range rl.limiters {
+			if entry.lastSeen.Before(cutoff) {
+				delete(rl.limiters, ip)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+// evictOldest removes the oldest 20% of entries
+func (rl *IPRateLimiter) evictOldest() {
+	if len(rl.limiters) == 0 {
+		return
+	}
+	
+	// Find oldest entries
+	type ipTime struct {
+		ip   string
+		time time.Time
+	}
+	
+	var entries []ipTime
+	for ip, entry := range rl.limiters {
+		entries = append(entries, ipTime{ip: ip, time: entry.lastSeen})
+	}
+	
+	// Sort by time (oldest first)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].time.Before(entries[j].time)
+	})
+	
+	// Remove oldest 20%
+	toRemove := len(entries) / 5
+	if toRemove < 100 {
+		toRemove = 100 // Remove at least 100
+	}
+	
+	for i := 0; i < toRemove && i < len(entries); i++ {
+		delete(rl.limiters, entries[i].ip)
+	}
 }
 
 type Application struct {
@@ -1142,26 +1227,43 @@ func (app *Application) RateLimitMiddleware() gin.HandlerFunc {
 func main() {
 	app := NewApplication()
 
-	// Initialize/restore Caddy configuration on startup (with retry)
+	// Initialize/restore Caddy configuration on startup (with backoff retry)
 	go func() {
-		// Wait a bit for Caddy to start, then try to restore config
-		time.Sleep(5 * time.Second)
+		// Wait longer for Caddy to fully start
+		time.Sleep(10 * time.Second)
 
-		for i := 0; i < 5; i++ {
+		maxRetries := 3
+		for i := 0; i < maxRetries; i++ {
 			if err := app.initializeCaddyConfig(); err != nil {
-				app.logger.Warn("Failed to initialize Caddy config, retrying", "attempt", i+1, "error", err)
-				time.Sleep(2 * time.Second)
+				backoffDelay := time.Duration(10*(i+1)) * time.Second // 10s, 20s, 30s
+				app.logger.Warn("Failed to initialize Caddy config, retrying", 
+					"attempt", i+1, 
+					"max_retries", maxRetries,
+					"retry_in_seconds", int(backoffDelay.Seconds()),
+					"error", err)
+				
+				if i < maxRetries-1 { // Don't sleep after last attempt
+					time.Sleep(backoffDelay)
+				}
 			} else {
-				app.logger.Info("Caddy configuration initialized successfully on startup")
+				app.logger.Info("Caddy configuration initialized successfully on startup", "attempt", i+1)
 				break
 			}
+		}
+		
+		// Log final failure if all retries exhausted
+		if err := app.initializeCaddyConfig(); err != nil {
+			app.logger.Error("Failed to initialize Caddy config after all retries", 
+				"max_retries", maxRetries,
+				"error", err,
+				"note", "Application will continue but may need manual Caddy configuration")
 		}
 	}()
 
 	// Set up Gin
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery(), app.SecurityHeaders())
+	r.Use(gin.Recovery(), app.SecurityHeaders()) // Removed gin.Logger() to prevent I/O spam
 
 	r.LoadHTMLGlob("/app/templates/*")
 	r.Static("/static", "/app/static")
