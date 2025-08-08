@@ -72,13 +72,12 @@ docker run -d --name simplelb -p 80:80 -p 443:443 -p 81:81 -v $(pwd)/data:/app/d
 1. **Create docker-compose.yml**:
 ```yaml
 services:
-  caddy-lb:
+  simple-lb:
     build: .
     ports:
       - "80:80"          # HTTP traffic
       - "443:443"        # HTTPS traffic
       - "81:81"          # Management web interface
-      - "2019:2019"      # Caddy Admin API
     environment:
       # Management Interface Authentication
       - ADMIN_USERNAME=admin
@@ -93,7 +92,7 @@ services:
       - ACME_EMAIL=admin@example.com  # Email for Let's Encrypt certificates
       
       # Caddy Integration
-      - CADDY_ADMIN_URL=http://127.0.0.1:2019  # Caddy Admin API URL
+      - CADDY_ADMIN_URL=http://127.0.0.1:2019  # Optional Caddy Admin API URL
     volumes:
       - ./data:/app/data
     restart: unless-stopped
@@ -417,7 +416,7 @@ For `header` and `cookie` methods:
 docker-compose logs -f
 
 # View specific service logs
-docker-compose logs -f caddy-lb
+docker-compose logs -f simple-lb
 
 # Check configuration
 curl http://localhost:2019/config/
@@ -442,9 +441,8 @@ docker-compose logs -f
 .
 ├── main.go                 # Go application
 ├── templates/              # HTML templates  
-│   ├── dashboard.html      # Main interface
-│   ├── login.html          # Login page
-│   └── logs.html          # Log viewer
+│   ├── dashboard.html      # Main interface with integrated logs modal
+│   └── login.html          # Login page
 ├── Dockerfile             # Container build
 ├── docker-compose.yml     # Service definition
 ├── supervisord.conf       # Process management

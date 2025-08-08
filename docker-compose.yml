@@ -1,5 +1,5 @@
 services:
-  caddy-lb:
+  simple-lb:
     build: .
     ports:
       - "80:80"          # HTTP traffic
@@ -15,6 +15,9 @@ services:
       # Security Configuration
       - SESSION_SECRET=your-super-secret-session-key-change-this-in-production
       - SESSION_COOKIE_SECURE=0       # Set to 1 for HTTPS in production
+      
+      # Rate Limiting Configuration (requests per minute)
+      - GENERAL_RATE_LIMIT=60         # All endpoints (60/min)
       
       # SSL/TLS Configuration
       - ACME_EMAIL=admin@example.com  # Email for Let's Encrypt certificates

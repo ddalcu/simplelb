@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 COPY go.mod ./
@@ -14,6 +14,7 @@ RUN apk add --no-cache supervisor
 
 COPY --from=builder /app/main /usr/local/bin/
 COPY --from=builder /app/templates /app/templates
+COPY --from=builder /app/static /app/static
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY supervisord.conf /etc/supervisor/conf.d/
 COPY start.sh /
