@@ -10,7 +10,34 @@ A lightweight, Docker-based load balancer built with **Caddy** and **Go**, featu
 ### Docker Compose (Recommended)
 ```yaml
 services:
-  simplelb:
+  simple-lb:
+    build: .
+    ports:
+      - "80:80"    # HTTP
+      - "443:443"  # HTTPS
+      - "81:81"    # Management UI
+    environment:
+      # Authentication
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=your-secure-password
+      - ACME_EMAIL=your-email@example.com
+      
+      # Configuration Management (optional)
+      - CONFIG_MODE=initial  # "initial" or "managed"
+      
+      # Pre-configure load balancers (optional)
+      - LB_DOMAINS_api=api.example.com
+      - LB_BACKENDS_api=192.168.1.100:8080,192.168.1.101:8080
+      - LB_METHOD_api=round_robin
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+```
+
+### Using Pre-built Image
+```yaml
+services:
+  simple-lb:
     image: ghcr.io/ddalcu/simplelb:latest
     ports:
       - "80:80"    # HTTP
@@ -25,12 +52,65 @@ services:
     restart: unless-stopped
 ```
 
-### Docker One-liner
+### Docker One-liner (Quick Demo)
 ```bash
-docker run -d --name simplelb -p 80:80 -p 443:443 -p 81:81 -v $(pwd)/data:/app/data -e ADMIN_USERNAME=admin -e ADMIN_PASSWORD=your-secure-password -e ACME_EMAIL=your-email@example.com ghcr.io/ddalcu/simplelb:latest
+docker run -d --name simplelb \
+  -p 80:80 -p 443:443 -p 81:81 \
+  -v $(pwd)/data:/app/data \
+  -e ADMIN_USERNAME=admin \
+  -e ADMIN_PASSWORD=demo123 \
+  -e ACME_EMAIL=demo@example.com \
+  ghcr.io/ddalcu/simplelb:latest
+```
+
+Or build from source:
+```bash
+git clone https://github.com/ddalcu/simplelb && cd simplelb
+docker build -t simplelb . && docker run -d --name simplelb \
+  -p 80:80 -p 443:443 -p 81:81 \
+  -v $(pwd)/data:/app/data \
+  -e ADMIN_USERNAME=admin \
+  -e ADMIN_PASSWORD=demo123 \
+  -e ACME_EMAIL=demo@example.com \
+  simplelb
 ```
 
 **Then visit:** https://localhost:81 (accept the self-signed certificate warning)
+
+## ⚙️ Environment-Based Configuration
+
+SimpleLB supports automatic load balancer setup through environment variables - perfect for Infrastructure as Code deployments:
+
+### Configuration Modes
+
+- **`CONFIG_MODE=initial`** (default): Environment load balancers applied only if no existing configuration
+- **`CONFIG_MODE=managed`**: Always apply environment configuration, UI becomes read-only (GitOps mode)
+
+### Environment Variable Pattern
+
+```bash
+# Load balancer named "api"
+LB_DOMAINS_api=api.example.com,www.api.example.com
+LB_BACKENDS_api=192.168.1.100:8080,192.168.1.101:8080,192.168.1.102:8080
+LB_METHOD_api=round_robin
+
+# Load balancer named "webapp" 
+LB_DOMAINS_webapp=app.example.com
+LB_BACKENDS_webapp=192.168.1.200:3000,192.168.1.201:3000
+LB_METHOD_webapp=least_conn
+```
+
+### Production Example (Managed Mode)
+```yaml
+environment:
+  - CONFIG_MODE=managed           # Read-only UI
+  - LB_DOMAINS_api=api.myapp.com
+  - LB_BACKENDS_api=10.0.1.100:8080,10.0.1.101:8080
+  - LB_METHOD_api=round_robin
+  - LB_DOMAINS_web=myapp.com,www.myapp.com
+  - LB_BACKENDS_web=10.0.2.100:3000,10.0.2.101:3000
+  - LB_METHOD_web=least_conn
+```
 
 ## ✨ Features
 
@@ -38,6 +118,7 @@ docker run -d --name simplelb -p 80:80 -p 443:443 -p 81:81 -v $(pwd)/data:/app/d
 - Multiple algorithms: Random, Round Robin, Least Connections, First Available, IP Hash, Header Hash, Cookie Hash
 - Real-time configuration updates via Caddy's admin API
 - Persistent configuration across restarts
+- Multi-domain support per load balancer
 
 ### 🔒 **Automatic HTTPS**
 - Let's Encrypt integration with automatic certificate provisioning
@@ -49,83 +130,41 @@ docker run -d --name simplelb -p 80:80 -p 443:443 -p 81:81 -v $(pwd)/data:/app/d
 - Clean, responsive dashboard
 - Easy load balancer management
 - Real-time log viewing
+- Configuration export/import
 - No CLI required
+
+### ⚙️ **Configuration Management**
+- **Environment Variables**: Automatic load balancer setup via `LB_*` variables
+- **Initial Mode**: Environment config applied only if no existing setup
+- **Managed Mode**: Infrastructure as Code with read-only UI
+- **GitOps Ready**: Perfect for container orchestration and CI/CD
 
 ## 📸 Screenshots
 
 ### Dashboard Overview
 ![SimpleLB Dashboard](screenshots/dashboard.png)
-*Simple dashboard for managing your load balancers*
+*Clean dashboard for managing your load balancers*
 
-### Add Load Balancer
-![Add Load Balancer](screenshots/addlb.png)
-*Easy form to add new load balancers*
+### Login Interface
+![Login Page](screenshots/login.png)
+*Secure HTTPS login with session management*
+
+### Add/Edit Load Balancer
+![Edit Load Balancer](screenshots/edit.png)
+*Easy form to configure load balancers with multiple algorithms*
 
 ### System Logs
 ![System Logs](screenshots/logs.png)
 *View application and Caddy logs in real-time*
 
-## 🚀 Quick Start
+### Managed Configuration Mode
+![Managed Mode](screenshots/managed-mode.png)
+*Infrastructure as Code mode with read-only UI*
 
-### Using Docker Compose (Recommended)
+### Caddy Configuration
+![Caddy Config](screenshots/caddy-config.png)
+*Export and view the generated Caddy configuration*
 
-1. **Create docker-compose.yml**:
-```yaml
-services:
-  simple-lb:
-    build: .
-    ports:
-      - "80:80"          # HTTP traffic
-      - "443:443"        # HTTPS traffic
-      - "81:81"          # Management web interface
-    environment:
-      # Management Interface Authentication
-      - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=password
-      - MANAGEMENT_PORT=81
-      
-      # Security Configuration
-      - SESSION_SECRET=your-super-secret-session-key-change-this-in-production
-      - SESSION_COOKIE_SECURE=0       # Set to 1 for HTTPS in production
-      
-      # SSL/TLS Configuration
-      - ACME_EMAIL=admin@example.com  # Email for Let's Encrypt certificates
-      
-      # Caddy Integration
-      - CADDY_ADMIN_URL=http://127.0.0.1:2019  # Optional Caddy Admin API URL
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-```
-
-2. **Start the service**:
-```bash
-docker-compose up -d
-```
-
-3. **Access the web interface**:
-   - Open https://localhost:81 (accept the self-signed certificate warning)
-   - Login with your configured credentials
-   - Start creating load balancers!
-
-   **Note**: The management interface uses HTTPS with a self-signed certificate for security. Your browser will show a security warning - this is normal for self-signed certificates.
-
-### Using Docker Build
-
-```bash
-# Clone the repo
-git clone <your-repo-url>
-
-# Build and run
-docker-compose up --build -d
-```
-
-### One-liner Docker Command
-
-```bash
-# Build and run with Docker (without compose)
-docker build -t simplelb . && docker run -d --name simplelb -p 80:80 -p 443:443 -p 81:81 -p 2019:2019 -v $(pwd)/data:/app/data -e ADMIN_USERNAME=admin -e ADMIN_PASSWORD=password -e ACME_EMAIL=admin@example.com simplelb
-```
 
 ## 📋 How to Use
 
@@ -171,17 +210,55 @@ For automatic HTTPS:
 
 ### Environment Variables
 
+#### Core Configuration
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ADMIN_USERNAME` | `admin` | Web interface username |
 | `ADMIN_PASSWORD` | `password` | Web interface password |
 | `MANAGEMENT_PORT` | `81` | Web interface port |
-| `SESSION_SECRET` | *default* | Session encryption key |
-| `SESSION_COOKIE_SECURE` | `0` | Set to `1` for HTTPS |
+| `SESSION_SECRET` | *auto-generated* | Session encryption key |
+| `SESSION_COOKIE_SECURE` | `0` | Set to `1` for HTTPS cookies |
 | `ACME_EMAIL` | `admin@example.com` | Let's Encrypt email |
-| `CADDY_ADMIN_URL` | `http://127.0.0.1:2019` | Caddy Admin API |
+| `CADDY_ADMIN_URL` | `http://127.0.0.1:2019` | Caddy Admin API URL |
+| `GENERAL_RATE_LIMIT` | `60` | Requests per minute per IP |
 
-Copy `.env.example` to `.env` and customize for your setup.
+#### Configuration Management
+| Variable | Options | Description |
+|----------|---------|-------------|
+| `CONFIG_MODE` | `initial`, `managed` | Configuration management mode |
+
+#### Environment Load Balancers
+| Pattern | Required | Description |
+|---------|----------|-------------|
+| `LB_DOMAINS_{name}` | ✅ | Comma-separated domain list |
+| `LB_BACKENDS_{name}` | ✅ | Comma-separated backend servers |
+| `LB_METHOD_{name}` | ❌ | Load balancing method (defaults to `random`) |
+
+**Supported Methods**: `random`, `round_robin`, `least_conn`, `first`, `ip_hash`, `header`, `cookie`
+
+### Deployment Scenarios
+
+**🏠 Development/Home Lab** (`CONFIG_MODE=initial`)
+```yaml
+environment:
+  - CONFIG_MODE=initial
+  - LB_DOMAINS_dev=dev.homelab.local
+  - LB_BACKENDS_dev=192.168.1.100:3000
+  # UI remains fully functional for additional configuration
+```
+
+**🏢 Production/CI/CD** (`CONFIG_MODE=managed`)
+```yaml
+environment:
+  - CONFIG_MODE=managed  # UI becomes read-only
+  - LB_DOMAINS_api=api.company.com
+  - LB_BACKENDS_api=10.0.1.100:8080,10.0.1.101:8080
+  - LB_METHOD_api=least_conn
+  - LB_DOMAINS_web=company.com,www.company.com
+  - LB_BACKENDS_web=10.0.2.100:3000,10.0.2.101:3000
+  - LB_METHOD_web=round_robin
+  # All changes must be made via environment variables
+```
 
 ### Data Persistence
 
@@ -213,18 +290,18 @@ All data is stored in `/app/data`:
 ### System Overview
 ```mermaid
 graph TD
-    A[Internet Traffic] --> B[Caddy Load Balancer<br/>Ports 80/443]
-    B --> C[Backend Server 1<br/>192.168.1.100:8080]
-    B --> D[Backend Server 2<br/>192.168.1.101:8080]
-    B --> E[Backend Server N<br/>192.168.1.10x:8080]
+    A["Internet Traffic"] --> B["Caddy Load Balancer\nPorts 80/443"]
+    B --> C["Backend Server 1\n192.168.1.100:8080"]
+    B --> D["Backend Server 2\n192.168.1.101:8080"]
+    B --> E["Backend Server N\n192.168.1.10x:8080"]
     
-    F[Management UI<br/>Port 81] --> G[SimpleLB App<br/>Go Application]
-    G --> H[Caddy Admin API<br/>Port 2019]
+    F["Management UI\nPort 81"] --> G["SimpleLB App\nGo Application"]
+    G --> H["Caddy Admin API\nPort 2019"]
     H --> B
     
-    I[Let's Encrypt] --> B
-    B --> J[SSL Certificates<br/>/app/data/caddy/data]
-    G --> K[Configuration<br/>/app/data/caddy/config]
+    I["Let's Encrypt"] --> B
+    B --> J["SSL Certificates\n/app/data/caddy/data"]
+    G --> K["Configuration\n/app/data/caddy/config"]
 ```
 
 ### Request Flow
@@ -234,7 +311,7 @@ sequenceDiagram
     participant LB as Caddy Load Balancer
     participant B1 as Backend 1
     participant B2 as Backend 2
-    participant LE as Let's Encrypt
+    participant LE as "Let's Encrypt"
     
     Note over C,LE: HTTPS Setup (First Time)
     C->>LB: HTTP Request to domain.com
@@ -259,16 +336,16 @@ sequenceDiagram
 ### Configuration Management
 ```mermaid
 graph LR
-    A[Web UI] --> B[Go Application]
-    B --> C[Caddy Admin API]
-    C --> D[Update Caddy Config]
-    D --> E[Save to /app/data/caddy/config/caddy.json]
+    A["Web UI"] --> B["Go Application"]
+    B --> C["Caddy Admin API"]
+    C --> D["Update Caddy Config"]
+    D --> E["Save to /app/data/caddy/config/caddy.json"]
     
-    F[Container Restart] --> G[Load Saved Config]
+    F["Container Restart"] --> G["Load Saved Config"]
     G --> C
     
-    H[Let's Encrypt] --> I[Store Certificates]
-    I --> J[/app/data/caddy/data/]
+    H["Let's Encrypt"] --> I["Store Certificates"]
+    I --> J["/app/data/caddy/data/"]
 ```
 
 ## 📁 Directory Structure
@@ -427,7 +504,7 @@ curl http://localhost:2019/config/
 ### Local Setup
 ```bash
 # Clone repository
-git clone <your-repo>
+git clone https://github.com/ddalcu/simplelb
 
 # Build and run
 docker-compose up --build

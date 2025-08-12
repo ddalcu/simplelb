@@ -386,13 +386,39 @@
             </div>
         </div>
 
+        <!-- Managed Mode Warning -->
+        {{if .isManaged}}
+        <div style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); border: 1px solid #f59e0b; border-radius: var(--radius); padding: 1rem; margin-bottom: 1rem; color: white; box-shadow: 0 4px 12px rgba(245, 158, 11, 0.2);">
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div style="font-size: 1.25rem;">
+                    <i class="fas fa-lock"></i>
+                </div>
+                <div>
+                    <div style="font-weight: 600; font-size: 1rem; margin-bottom: 0.25rem;">
+                        Configuration Management Mode: MANAGED
+                    </div>
+                    <div style="font-size: 0.9rem; opacity: 0.9;">
+                        This load balancer configuration is managed through environment variables. 
+                        To make changes, update your docker-compose.yml and restart the container.
+                    </div>
+                </div>
+            </div>
+        </div>
+        {{end}}
+
         <!-- Main Content -->
         <div class="main-card">
             <div class="card-header">
                 <h2 class="card-title">Load Balancers</h2>
+                {{if .isManaged}}
+                <button class="btn btn-primary" disabled title="Configuration is managed via environment variables">
+                    <i class="fas fa-lock"></i> Managed Configuration
+                </button>
+                {{else}}
                 <button onclick="openAddModal()" class="btn btn-primary">
                     <i class="fas fa-plus"></i> Add Load Balancer
                 </button>
+                {{end}}
             </div>
             
             <div class="lb-list">
@@ -446,12 +472,18 @@
                                 </td>
                                 
                                 <td class="actions-cell" data-label="Actions">
+                                    {{if $.isManaged}}
+                                    <button class="btn btn-outline" disabled title="Configuration is managed via environment variables">
+                                        <i class="fas fa-lock"></i> View Only
+                                    </button>
+                                    {{else}}
                                     <button onclick="editLB('{{.domain}}')" class="btn btn-outline">
                                         <i class="fas fa-edit"></i> Edit
                                     </button>
                                     <button onclick="deleteLB('{{.domain}}')" class="btn btn-danger">
                                         <i class="fas fa-trash"></i> Delete
                                     </button>
+                                    {{end}}
                                 </td>
                             </tr>
                             {{end}}
@@ -551,9 +583,15 @@
                         <button onclick="exportConfig()" class="btn btn-primary" style="flex: 1;">
                             <i class="fas fa-download"></i> Export Config
                         </button>
+                        {{if .isManaged}}
+                        <button class="btn btn-success" disabled style="flex: 1;" title="Configuration is managed via environment variables">
+                            <i class="fas fa-lock"></i> Import Disabled
+                        </button>
+                        {{else}}
                         <button onclick="showImportForm()" class="btn btn-success" style="flex: 1;">
                             <i class="fas fa-upload"></i> Import Config
                         </button>
+                        {{end}}
                     </div>
                     <p style="color: var(--text-secondary); font-size: 0.9rem; text-align: center;">
                         Export current Caddy configuration or import a new one
@@ -646,8 +684,13 @@
 
     <script>
         let isEditMode = false;
+        let isManaged = {{.isManaged}};
 
         function openAddModal() {
+            if (isManaged) {
+                alert('⚠️ Configuration is managed via environment variables. Editing is disabled.');
+                return;
+            }
             isEditMode = false;
             document.getElementById('modalTitle').textContent = 'Add Load Balancer';
             document.getElementById('submitBtn').innerHTML = '<i class="fas fa-plus"></i> Add Load Balancer';
@@ -659,6 +702,10 @@
 
 
         function editLB(domain) {
+            if (isManaged) {
+                alert('⚠️ Configuration is managed via environment variables. Editing is disabled.');
+                return;
+            }
             isEditMode = true;
             document.getElementById('modalTitle').textContent = 'Edit Load Balancer';
             document.getElementById('submitBtn').innerHTML = '<i class="fas fa-save"></i> Save Changes';
@@ -713,6 +760,10 @@
         }
 
         function deleteLB(domain) {
+            if (isManaged) {
+                alert('⚠️ Configuration is managed via environment variables. Editing is disabled.');
+                return;
+            }
             if (confirm('⚠️ Are you sure you want to delete the load balancer for ' + domain + '?\n\nThis action cannot be undone.')) {
                 const button = event.target;
                 const originalText = button.innerHTML;
@@ -779,6 +830,10 @@
         }
 
         function showImportForm() {
+            if (isManaged) {
+                alert('⚠️ Configuration is managed via environment variables. Import is disabled.');
+                return;
+            }
             document.getElementById('exportSection').style.display = 'none';
             document.getElementById('importSection').style.display = 'block';
         }

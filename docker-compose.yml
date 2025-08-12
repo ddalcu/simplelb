@@ -2,28 +2,48 @@ services:
   simple-lb:
     build: .
     ports:
-      - "80:80"          # HTTP traffic
-      - "443:443"        # HTTPS traffic
-      - "81:81"          # Management web interface (HTTPS)
-      - "2019:2019"      # Caddy Admin API
+      - "80:80" # HTTP traffic
+      - "443:443" # HTTPS traffic
+      - "81:81" # Management web interface (HTTPS)
     environment:
       # Management Interface Authentication
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=password
       - MANAGEMENT_PORT=81
-      
+
       # Security Configuration
       - SESSION_SECRET=your-super-secret-session-key-change-this-in-production
-      - SESSION_COOKIE_SECURE=0       # Set to 1 for HTTPS in production
-      
+      - SESSION_COOKIE_SECURE=0 # Set to 1 for HTTPS in production
+
       # Rate Limiting Configuration (requests per minute)
-      - GENERAL_RATE_LIMIT=60         # All endpoints (60/min)
-      
+      - GENERAL_RATE_LIMIT=60 # All endpoints (60/min)
+
       # SSL/TLS Configuration
-      - ACME_EMAIL=admin@example.com  # Email for Let's Encrypt certificates
-      
+      - ACME_EMAIL=admin@example.com # Email for Let's Encrypt certificates
+
       # Caddy Integration
-      - CADDY_ADMIN_URL=http://127.0.0.1:2019  # Caddy Admin API URL
+      - CADDY_ADMIN_URL=http://127.0.0.1:2019 # Caddy Admin API URL
+
+      # Configuration Management
+      - CONFIG_MODE=initial # "initial" (default, update via UI) or "managed" (cannot be changed by UI)
+
+      # Environment-based Load Balancer Configuration (optional)
+      # Uncomment and configure as needed:
+
+      # Load Balancer Example: API Service
+      - LB_DOMAINS_api=api.example.com,www.api.example.com
+      - LB_BACKENDS_api=192.168.1.100:8080,192.168.1.101:8080,192.168.1.102:8080
+      - LB_METHOD_api=round_robin
+
+      # Load Balancer Example: Web Application
+      - LB_DOMAINS_webapp=app.example.com
+      - LB_BACKENDS_webapp=192.168.1.200:3000,192.168.1.201:3000
+      - LB_METHOD_webapp=least_conn
+
+      # Load Balancer Example: Admin Interface
+      # - LB_DOMAINS_admin=admin.example.com
+      # - LB_BACKENDS_admin=192.168.1.150:9000
+      # - LB_METHOD_admin=random
     volumes:
       - ./data:/app/data
     restart: unless-stopped

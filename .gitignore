@@ -27,6 +27,7 @@ main
 *.out
 go.work
 go.work.sum
+simplelb
 
 # Application Data
 config.json
