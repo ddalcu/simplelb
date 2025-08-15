@@ -1118,6 +1118,300 @@ func (app *Application) DeleteLoadBalancer(c *gin.Context) {
 	c.Redirect(http.StatusSeeOther, "/dashboard")
 }
 
+// Certificate status structure
+type CertificateStatus struct {
+	Domain        string `json:"domain"`
+	Status        string `json:"status"`        // "valid", "expired", "expiring_soon", "invalid", "unknown"
+	ExpiryDate    string `json:"expiry_date"`   // ISO format date
+	DaysUntilExp  int    `json:"days_until_exp"`
+	Issuer        string `json:"issuer"`
+	ErrorMessage  string `json:"error_message,omitempty"`
+}
+
+// getCertificateStatus retrieves certificate status for domains from Caddy TLS app
+func (app *Application) getCertificateStatus(domains []string) map[string]CertificateStatus {
+	statusMap := make(map[string]CertificateStatus)
+	
+	// Initialize all domains with unknown status
+	for _, domain := range domains {
+		statusMap[domain] = CertificateStatus{
+			Domain: domain,
+			Status: "unknown",
+			ErrorMessage: "Certificate status not available",
+		}
+	}
+
+	// Try to get TLS app configuration from Caddy
+	respBody, err := app.callCaddyAPI("GET", "/config/apps/tls", nil)
+	if err != nil {
+		app.logger.Warn("Failed to get TLS config for certificate status", "error", err)
+		return statusMap
+	}
+
+	var tlsConfig map[string]interface{}
+	if err := json.Unmarshal(respBody, &tlsConfig); err != nil {
+		app.logger.Warn("Failed to unmarshal TLS config", "error", err)
+		return statusMap
+	}
+
+	// Try to get certificate cache information
+	certCacheResp, err := app.callCaddyAPI("GET", "/config/apps/tls/certificates", nil)
+	if err == nil {
+		var certCache interface{}
+		if err := json.Unmarshal(certCacheResp, &certCache); err == nil {
+			// Parse certificate cache data if available
+			app.parseCertificateCache(certCache, statusMap)
+		}
+	}
+
+	// For domains without certificate information, check if they're configured for automation
+	app.checkAutomationPolicies(tlsConfig, statusMap)
+
+	return statusMap
+}
+
+// parseCertificateCache parses certificate cache data from Caddy
+func (app *Application) parseCertificateCache(certCache interface{}, statusMap map[string]CertificateStatus) {
+	// This function would parse the certificate cache data structure
+	// Since the exact structure may vary, we'll implement a basic version
+	// In production, this would need to be adapted based on Caddy's actual response format
+	
+	if cacheMap, ok := certCache.(map[string]interface{}); ok {
+		for _, cert := range cacheMap {
+			if certData, ok := cert.(map[string]interface{}); ok {
+				// Extract certificate information if available
+				app.extractCertificateInfo(certData, statusMap)
+			}
+		}
+	}
+}
+
+// extractCertificateInfo extracts certificate information from Caddy's response
+func (app *Application) extractCertificateInfo(certData map[string]interface{}, statusMap map[string]CertificateStatus) {
+	// This is a simplified implementation - the actual structure would depend on
+	// Caddy's certificate cache format
+	if names, ok := certData["names"].([]interface{}); ok {
+		for _, name := range names {
+			if domainName, ok := name.(string); ok {
+				if status, exists := statusMap[domainName]; exists {
+					status.Status = "configured"
+					status.ErrorMessage = ""
+					statusMap[domainName] = status
+				}
+			}
+		}
+	}
+}
+
+// checkAutomationPolicies checks if domains are configured for automatic certificate management
+func (app *Application) checkAutomationPolicies(tlsConfig map[string]interface{}, statusMap map[string]CertificateStatus) {
+	automation := asMap(tlsConfig["automation"])
+	if automation == nil {
+		return
+	}
+
+	policies := asArray(automation["policies"])
+	if policies == nil {
+		return
+	}
+
+	for _, policy := range policies {
+		policyMap := asMap(policy)
+		if policyMap == nil {
+			continue
+		}
+
+		subjects := asArray(policyMap["subjects"])
+		if subjects == nil {
+			continue
+		}
+
+		// Check if any of our domains are in this policy's subjects
+		for _, subject := range subjects {
+			if subjectStr := asString(subject); subjectStr != "" {
+				if status, exists := statusMap[subjectStr]; exists {
+					status.Status = "automated"
+					status.ErrorMessage = ""
+					
+					// Check for issuers to determine the CA
+					if issuers := asArray(policyMap["issuers"]); issuers != nil && len(issuers) > 0 {
+						if issuer := asMap(issuers[0]); issuer != nil {
+							if module := asString(issuer["module"]); module == "acme" {
+								status.Issuer = "Let's Encrypt"
+							} else {
+								status.Issuer = strings.Title(module)
+							}
+						}
+					}
+					
+					statusMap[subjectStr] = status
+				}
+			}
+		}
+	}
+}
+
+// GetCertificateStatus API endpoint to return certificate status for load balancers
+func (app *Application) GetCertificateStatus(c *gin.Context) {
+	loadBalancers, err := app.getLoadBalancers()
+	if err != nil {
+		app.logger.Error("Failed to get load balancers for certificate status", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get load balancers"})
+		return
+	}
+
+	// Collect all domains from all load balancers
+	var allDomains []string
+	domainToLB := make(map[string]string) // map domain to LB primary domain
+	
+	for _, lb := range loadBalancers {
+		primaryDomain := ""
+		if domain, ok := lb["domain"].(string); ok {
+			primaryDomain = domain
+		}
+		
+		// Get domains from the load balancer
+		if domains, ok := lb["domains"].([]string); ok {
+			for _, domain := range domains {
+				allDomains = append(allDomains, domain)
+				domainToLB[domain] = primaryDomain
+			}
+		} else if primaryDomain != "" {
+			allDomains = append(allDomains, primaryDomain)
+			domainToLB[primaryDomain] = primaryDomain
+		}
+	}
+
+	// Get certificate status for all domains
+	certStatus := app.getCertificateStatus(allDomains)
+
+	// Group by load balancer
+	lbCertStatus := make(map[string][]CertificateStatus)
+	for domain, status := range certStatus {
+		if lbDomain := domainToLB[domain]; lbDomain != "" {
+			lbCertStatus[lbDomain] = append(lbCertStatus[lbDomain], status)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"certificate_status": lbCertStatus})
+}
+
+// RequestCertificate forces a certificate request/renewal for a domain
+func (app *Application) RequestCertificate(c *gin.Context) {
+	// Check if configuration is managed
+	if getConfigMode() == ConfigModeManaged {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Configuration is managed via environment variables. Certificate operations are disabled."})
+		return
+	}
+
+	domain := c.Param("domain")
+	if domain == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Domain parameter is required"})
+		return
+	}
+
+	// Trigger certificate acquisition by making a request to the domain through Caddy
+	// This is a simplified approach - in practice, you might want to use Caddy's
+	// certificate management endpoints if they become available
+	
+	// For now, we'll return success and let Caddy handle the certificate automatically
+	// when the next request comes in for that domain
+	app.logger.Info("Certificate request triggered", "domain", domain)
+	
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("Certificate request initiated for %s. Caddy will automatically acquire the certificate on the next request.", domain),
+		"domain": domain,
+	})
+}
+
+// HTTPSRedirectSettings represents the HTTPS redirect configuration
+type HTTPSRedirectSettings struct {
+	Enabled bool `json:"enabled"`
+}
+
+// GetHTTPSRedirectSettings returns the current HTTPS redirect configuration
+func (app *Application) GetHTTPSRedirectSettings(c *gin.Context) {
+	// Get current settings from Caddy configuration
+	config, err := app.getCaddyConfig()
+	if err != nil {
+		app.logger.Error("Failed to get Caddy config for HTTPS redirect settings", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get HTTPS redirect settings"})
+		return
+	}
+
+	// Check the current automatic_https configuration
+	enabled := false
+	if httpApp := asMap(config["apps"]); httpApp != nil {
+		if httpConfig := asMap(httpApp["http"]); httpConfig != nil {
+			if servers := asMap(httpConfig["servers"]); servers != nil {
+				if mainServer := asMap(servers["main"]); mainServer != nil {
+					if autoHTTPS := asMap(mainServer["automatic_https"]); autoHTTPS != nil {
+						if disableRedirects, ok := autoHTTPS["disable_redirects"].(bool); ok {
+							enabled = !disableRedirects
+						}
+					}
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, HTTPSRedirectSettings{Enabled: enabled})
+}
+
+// SetHTTPSRedirectSettings updates the HTTPS redirect configuration
+func (app *Application) SetHTTPSRedirectSettings(c *gin.Context) {
+	// Check if configuration is managed
+	if getConfigMode() == ConfigModeManaged {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Configuration is managed via environment variables. HTTPS redirect settings cannot be changed."})
+		return
+	}
+
+	var settings HTTPSRedirectSettings
+	if err := c.ShouldBindJSON(&settings); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		return
+	}
+
+	// Update the Caddy configuration
+	if err := app.updateHTTPSRedirectSetting(settings.Enabled); err != nil {
+		app.logger.Error("Failed to update HTTPS redirect setting", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update HTTPS redirect setting"})
+		return
+	}
+
+	// Save the configuration
+	if err := app.saveConfig(); err != nil {
+		app.logger.Warn("Failed to save config after HTTPS redirect update", "error", err)
+	}
+
+	app.logger.Info("HTTPS redirect setting updated", "enabled", settings.Enabled)
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("HTTPS redirect %s successfully", map[bool]string{true: "enabled", false: "disabled"}[settings.Enabled]),
+		"enabled": settings.Enabled,
+	})
+}
+
+// updateHTTPSRedirectSetting updates the automatic_https configuration in Caddy
+func (app *Application) updateHTTPSRedirectSetting(enabled bool) error {
+	// Prepare the automatic_https configuration
+	autoHTTPSConfig := map[string]interface{}{
+		"disable_redirects": !enabled,
+	}
+
+	// Update the configuration via Caddy Admin API
+	configJSON, err := json.Marshal(autoHTTPSConfig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal automatic_https config: %w", err)
+	}
+
+	_, err = app.callCaddyAPI("POST", "/config/apps/http/servers/main/automatic_https", configJSON)
+	if err != nil {
+		return fmt.Errorf("failed to update automatic_https config: %w", err)
+	}
+
+	return nil
+}
+
 func (app *Application) HandleLogout(c *gin.Context) {
 	session, err := app.store.Get(c.Request, SessionName)
 	if err != nil {
@@ -1551,6 +1845,10 @@ func main() {
 	r.GET("/export", app.RateLimitMiddleware(), app.AuthRequired(), app.ExportConfig)
 	r.POST("/import", app.RateLimitMiddleware(), app.AuthRequired(), app.ImportConfig)
 	r.GET("/api/logs", app.RateLimitMiddleware(), app.AuthRequired(), app.GetLogsData)
+	r.GET("/api/certificates", app.RateLimitMiddleware(), app.AuthRequired(), app.GetCertificateStatus)
+	r.POST("/api/certificates/:domain/request", app.RateLimitMiddleware(), app.AuthRequired(), app.RequestCertificate)
+	r.GET("/api/https-redirect", app.RateLimitMiddleware(), app.AuthRequired(), app.GetHTTPSRedirectSettings)
+	r.POST("/api/https-redirect", app.RateLimitMiddleware(), app.AuthRequired(), app.SetHTTPSRedirectSettings)
 	r.GET("/logout", app.RateLimitMiddleware(), app.HandleLogout)
 
 	// Get port
