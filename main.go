@@ -41,10 +41,10 @@ const (
 	CaddyAdminURL         = "http://127.0.0.1:2019"
 	RequestTimeout        = 30 * time.Second
 	SessionName           = "simple-lb-session"
-	
+
 	// Rate limiting defaults
-	DefaultRateLimit = 60    // requests per minute
-	
+	DefaultRateLimit = 60 // requests per minute
+
 	// Configuration modes
 	ConfigModeInitial = "initial" // Apply config only if no existing load balancers
 	ConfigModeManaged = "managed" // Always apply config, UI read-only
@@ -117,10 +117,10 @@ func NewIPRateLimiter(rateLimit rate.Limit) *IPRateLimiter {
 		rate:       rateLimit,
 		maxEntries: 10000, // Limit to 10k IPs max
 	}
-	
+
 	// Start cleanup goroutine
 	go rl.cleanup()
-	
+
 	return rl
 }
 
@@ -138,13 +138,13 @@ func (rl *IPRateLimiter) GetLimiter(ip string) *rate.Limiter {
 	// Need to create new limiter
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	
+
 	// Check again in case another goroutine created it
 	if entry, exists := rl.limiters[ip]; exists {
 		entry.lastSeen = time.Now()
 		return entry.limiter
 	}
-	
+
 	// Prevent memory exhaustion
 	if len(rl.limiters) >= rl.maxEntries {
 		// Remove oldest entries
@@ -163,11 +163,11 @@ func (rl *IPRateLimiter) GetLimiter(ip string) *rate.Limiter {
 func (rl *IPRateLimiter) cleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		rl.mu.Lock()
 		cutoff := time.Now().Add(-30 * time.Minute) // Remove IPs not seen for 30 minutes
-		
+
 		for ip, entry := range rl.limiters {
 			if entry.lastSeen.Before(cutoff) {
 				delete(rl.limiters, ip)
@@ -182,29 +182,29 @@ func (rl *IPRateLimiter) evictOldest() {
 	if len(rl.limiters) == 0 {
 		return
 	}
-	
+
 	// Find oldest entries
 	type ipTime struct {
 		ip   string
 		time time.Time
 	}
-	
+
 	var entries []ipTime
 	for ip, entry := range rl.limiters {
 		entries = append(entries, ipTime{ip: ip, time: entry.lastSeen})
 	}
-	
+
 	// Sort by time (oldest first)
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].time.Before(entries[j].time)
 	})
-	
+
 	// Remove oldest 20%
 	toRemove := len(entries) / 5
 	if toRemove < 100 {
 		toRemove = 100 // Remove at least 100
 	}
-	
+
 	for i := 0; i < toRemove && i < len(entries); i++ {
 		delete(rl.limiters, entries[i].ip)
 	}
@@ -332,24 +332,24 @@ func getConfigMode() string {
 func (app *Application) parseEnvironmentLoadBalancers() ([]EnvironmentLoadBalancer, error) {
 	var loadBalancers []EnvironmentLoadBalancer
 	nameMap := make(map[string]*EnvironmentLoadBalancer)
-	
+
 	// Scan all environment variables for LB_ patterns
 	for _, env := range os.Environ() {
 		parts := strings.SplitN(env, "=", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		key := parts[0]
 		value := parts[1]
-		
+
 		// Look for LB_DOMAINS_, LB_BACKENDS_, LB_METHOD_ patterns
 		if strings.HasPrefix(key, "LB_DOMAINS_") {
 			name := strings.TrimPrefix(key, "LB_DOMAINS_")
 			if name == "" {
 				continue
 			}
-			
+
 			if nameMap[name] == nil {
 				nameMap[name] = &EnvironmentLoadBalancer{Name: name}
 			}
@@ -359,7 +359,7 @@ func (app *Application) parseEnvironmentLoadBalancers() ([]EnvironmentLoadBalanc
 			if name == "" {
 				continue
 			}
-			
+
 			if nameMap[name] == nil {
 				nameMap[name] = &EnvironmentLoadBalancer{Name: name}
 			}
@@ -369,14 +369,14 @@ func (app *Application) parseEnvironmentLoadBalancers() ([]EnvironmentLoadBalanc
 			if name == "" {
 				continue
 			}
-			
+
 			if nameMap[name] == nil {
 				nameMap[name] = &EnvironmentLoadBalancer{Name: name}
 			}
 			nameMap[name].Method = strings.TrimSpace(value)
 		}
 	}
-	
+
 	// Validate and collect load balancers
 	for name, lb := range nameMap {
 		// Validate required fields
@@ -388,20 +388,20 @@ func (app *Application) parseEnvironmentLoadBalancers() ([]EnvironmentLoadBalanc
 			app.logger.Warn("Skipping load balancer: missing backends", "name", name)
 			continue
 		}
-		
+
 		// Set default method if not specified
 		if lb.Method == "" {
 			lb.Method = "random"
 		}
-		
+
 		loadBalancers = append(loadBalancers, *lb)
-		app.logger.Info("Discovered environment load balancer", 
-			"name", name, 
-			"domains", lb.Domains, 
+		app.logger.Info("Discovered environment load balancer",
+			"name", name,
+			"domains", lb.Domains,
 			"method", lb.Method,
 			"backend_count", len(strings.Split(lb.Backends, ",")))
 	}
-	
+
 	return loadBalancers, nil
 }
 
@@ -474,8 +474,8 @@ func (app *Application) parseRouteToLoadBalancer(route CaddyRoute) map[string]in
 		method = lb.SelectionPolicy.Policy
 	}
 	return map[string]interface{}{
-		"domain":   hosts[0],                       // Primary domain for compatibility
-		"domains":  hosts,                          // All domains
+		"domain":   hosts[0], // Primary domain for compatibility
+		"domains":  hosts,    // All domains
 		"backends": backends,
 		"method":   method,
 	}
@@ -484,21 +484,21 @@ func (app *Application) parseRouteToLoadBalancer(route CaddyRoute) map[string]in
 func (app *Application) initializeCaddyConfig() error {
 	configMode := getConfigMode()
 	app.logger.Info("Initializing Caddy configuration", "mode", configMode)
-	
+
 	// Parse environment load balancers
 	envLoadBalancers, err := app.parseEnvironmentLoadBalancers()
 	if err != nil {
 		app.logger.Error("Failed to parse environment load balancers", "error", err)
 		return fmt.Errorf("failed to parse environment load balancers: %w", err)
 	}
-	
+
 	// Handle configuration based on mode
 	switch configMode {
 	case ConfigModeManaged:
 		// In managed mode, always apply environment configuration
 		app.logger.Info("Managed mode: applying environment configuration", "load_balancer_count", len(envLoadBalancers))
 		return app.applyEnvironmentConfiguration(envLoadBalancers)
-		
+
 	case ConfigModeInitial:
 		// In initial mode, try to load saved config first
 		if app.loadSavedConfigIfExists() {
@@ -514,20 +514,20 @@ func (app *Application) initializeCaddyConfig() error {
 			}
 			return nil
 		}
-		
+
 		// No saved config, initialize fresh and apply environment config
 		if err := app.initializeFreshCaddyConfig(); err != nil {
 			return err
 		}
-		
+
 		if len(envLoadBalancers) > 0 {
 			app.logger.Info("Applying initial environment configuration", "count", len(envLoadBalancers))
 			return app.applyEnvironmentLoadBalancers(envLoadBalancers)
 		}
-		
+
 		return nil
 	}
-	
+
 	return fmt.Errorf("unknown configuration mode: %s", configMode)
 }
 
@@ -538,34 +538,59 @@ func (app *Application) loadSavedConfigIfExists() bool {
 		app.logger.Info("No saved config found, will initialize fresh", "error", err)
 		return false
 	}
-	
+
 	app.logger.Info("Loading saved configuration")
 	configJSON, err := json.Marshal(savedConfig)
 	if err != nil {
 		app.logger.Warn("Failed to marshal saved config", "error", err)
 		return false
 	}
-	
+
 	_, err = app.callCaddyAPI("POST", "/load", configJSON)
 	if err != nil {
 		app.logger.Warn("Failed to load saved config", "error", err)
 		return false
 	}
-	
+
 	app.logger.Info("Saved configuration loaded successfully")
 	return true
 }
 
+// getHTTPSRedirectEnabled returns whether HTTPS redirects should be enabled
+func getHTTPSRedirectEnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(getEnv("HTTPS_REDIRECT", "false")))
+	return value == "true" || value == "1" || value == "yes" || value == "on"
+}
+
 // initializeFreshCaddyConfig sets up a minimal base Caddy configuration
 func (app *Application) initializeFreshCaddyConfig() error {
+	// Determine if HTTPS redirects should be enabled
+	httpsRedirect := getHTTPSRedirectEnabled()
+
+	// Server configuration
+	serverConfig := map[string]interface{}{
+		"listen": []string{":80", ":443"},
+		"routes": []interface{}{},
+	}
+
+	// Add automatic HTTPS redirect configuration if enabled
+	if httpsRedirect {
+		serverConfig["automatic_https"] = map[string]interface{}{
+			"disable_redirects": false,
+		}
+		app.logger.Info("HTTPS redirects enabled for all domains")
+	} else {
+		serverConfig["automatic_https"] = map[string]interface{}{
+			"disable_redirects": true,
+		}
+		app.logger.Info("HTTPS redirects disabled")
+	}
+
 	initial := map[string]interface{}{
 		"apps": map[string]interface{}{
 			"http": map[string]interface{}{
 				"servers": map[string]interface{}{
-					"main": map[string]interface{}{
-						"listen": []string{":80", ":443"},
-						"routes": []interface{}{},
-					},
+					"main": serverConfig,
 				},
 				"https_port":     443,
 				"http_port":      80,
@@ -610,16 +635,16 @@ func (app *Application) initializeFreshCaddyConfig() error {
 			},
 		},
 	}
-	
+
 	configJSON, err := json.Marshal(initial)
 	if err != nil {
 		return fmt.Errorf("failed to marshal initial config: %w", err)
 	}
-	
+
 	if _, err := app.callCaddyAPI("POST", "/load", configJSON); err != nil {
 		app.logger.Warn("Failed to load initial config (may already be configured)", "error", err)
 	}
-	
+
 	return nil
 }
 
@@ -629,7 +654,7 @@ func (app *Application) applyEnvironmentConfiguration(envLoadBalancers []Environ
 	if err := app.initializeFreshCaddyConfig(); err != nil {
 		return fmt.Errorf("failed to initialize fresh config: %w", err)
 	}
-	
+
 	// Apply environment load balancers
 	return app.applyEnvironmentLoadBalancers(envLoadBalancers)
 }
@@ -639,17 +664,17 @@ func (app *Application) applyEnvironmentLoadBalancers(envLoadBalancers []Environ
 	if len(envLoadBalancers) == 0 {
 		return nil
 	}
-	
+
 	var errors []string
 	successCount := 0
-	
+
 	for _, envLB := range envLoadBalancers {
 		req := LoadBalancerRequest{
 			Domain:   envLB.Domains,
 			Backends: envLB.Backends,
 			Method:   envLB.Method,
 		}
-		
+
 		// Use internal create method that doesn't call initializeCaddyConfig again
 		if err := app.createLoadBalancerInternal(req); err != nil {
 			errorMsg := fmt.Sprintf("Failed to create load balancer '%s': %v", envLB.Name, err)
@@ -660,23 +685,23 @@ func (app *Application) applyEnvironmentLoadBalancers(envLoadBalancers []Environ
 			app.logger.Info("Successfully created environment load balancer", "name", envLB.Name, "domains", envLB.Domains)
 		}
 	}
-	
+
 	// Save configuration after applying environment load balancers
 	if successCount > 0 {
 		if err := app.saveConfig(); err != nil {
 			app.logger.Warn("Failed to save config after applying environment load balancers", "error", err)
 		}
 	}
-	
-	app.logger.Info("Environment load balancer application complete", 
-		"successful", successCount, 
+
+	app.logger.Info("Environment load balancer application complete",
+		"successful", successCount,
 		"failed", len(errors),
 		"total", len(envLoadBalancers))
-	
+
 	if len(errors) > 0 && successCount == 0 {
 		return fmt.Errorf("failed to create any environment load balancers: %s", strings.Join(errors, "; "))
 	}
-	
+
 	return nil
 }
 
@@ -712,7 +737,7 @@ func (app *Application) createLoadBalancerInternal(req LoadBalancerRequest) erro
 	} else {
 		backendLines = strings.Split(strings.TrimSpace(req.Backends), ",")
 	}
-	
+
 	var upstreams []map[string]interface{}
 	for _, line := range backendLines {
 		line = strings.TrimSpace(line)
@@ -955,7 +980,7 @@ func (app *Application) AddLoadBalancer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Domain is required"})
 		return
 	}
-	
+
 	// Validate each domain
 	domains := strings.Split(strings.TrimSpace(req.Domain), ",")
 	for _, domain := range domains {
@@ -1000,7 +1025,7 @@ func (app *Application) GetLoadBalancer(c *gin.Context) {
 				backends = backendsArray
 			}
 
-			// Convert domains array to comma-separated string  
+			// Convert domains array to comma-separated string
 			domainString := domain // fallback to primary domain
 			if domainsArray, ok := lb["domains"].([]string); ok && len(domainsArray) > 0 {
 				domainString = strings.Join(domainsArray, ", ")
@@ -1041,8 +1066,8 @@ func (app *Application) UpdateLoadBalancer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Domain is required"})
 		return
 	}
-	
-	// Validate each domain  
+
+	// Validate each domain
 	domains := strings.Split(strings.TrimSpace(req.Domain), ",")
 	for _, domain := range domains {
 		domain = strings.TrimSpace(domain)
@@ -1450,10 +1475,10 @@ func (app *Application) RateLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := getClientIP(c)
 		limiter := app.limiter.GetLimiter(ip)
-		
+
 		if !limiter.Allow() {
 			app.logger.Warn("Rate limit exceeded", "ip", ip, "path", c.Request.URL.Path)
-			
+
 			// Different response format for HTML vs API endpoints
 			if c.Request.URL.Path == "/" || c.Request.URL.Path == "/login" {
 				c.HTML(http.StatusTooManyRequests, "login.html", gin.H{
@@ -1483,12 +1508,12 @@ func main() {
 		for i := 0; i < maxRetries; i++ {
 			if err := app.initializeCaddyConfig(); err != nil {
 				backoffDelay := time.Duration(10*(i+1)) * time.Second // 10s, 20s, 30s
-				app.logger.Warn("Failed to initialize Caddy config, retrying", 
-					"attempt", i+1, 
+				app.logger.Warn("Failed to initialize Caddy config, retrying",
+					"attempt", i+1,
 					"max_retries", maxRetries,
 					"retry_in_seconds", int(backoffDelay.Seconds()),
 					"error", err)
-				
+
 				if i < maxRetries-1 { // Don't sleep after last attempt
 					time.Sleep(backoffDelay)
 				}
@@ -1497,10 +1522,10 @@ func main() {
 				break
 			}
 		}
-		
+
 		// Log final failure if all retries exhausted
 		if err := app.initializeCaddyConfig(); err != nil {
-			app.logger.Error("Failed to initialize Caddy config after all retries", 
+			app.logger.Error("Failed to initialize Caddy config after all retries",
 				"max_retries", maxRetries,
 				"error", err,
 				"note", "Application will continue but may need manual Caddy configuration")

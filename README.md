@@ -21,6 +21,7 @@ services:
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=your-secure-password
       - ACME_EMAIL=your-email@example.com
+      - HTTPS_REDIRECT=true
       
       # Configuration Management (optional)
       - CONFIG_MODE=initial  # "initial" or "managed"
@@ -47,6 +48,7 @@ services:
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=your-secure-password
       - ACME_EMAIL=your-email@example.com
+      - HTTPS_REDIRECT=true
     volumes:
       - ./data:/app/data
     restart: unless-stopped
@@ -60,6 +62,7 @@ docker run -d --name simplelb \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD=demo123 \
   -e ACME_EMAIL=demo@example.com \
+  -e HTTPS_REDIRECT=true \
   ghcr.io/ddalcu/simplelb:latest
 ```
 
@@ -72,6 +75,7 @@ docker build -t simplelb . && docker run -d --name simplelb \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD=demo123 \
   -e ACME_EMAIL=demo@example.com \
+  -e HTTPS_REDIRECT=true \
   simplelb
 ```
 
@@ -219,6 +223,7 @@ For automatic HTTPS:
 | `SESSION_SECRET` | *auto-generated* | Session encryption key |
 | `SESSION_COOKIE_SECURE` | `0` | Set to `1` for HTTPS cookies |
 | `ACME_EMAIL` | `admin@example.com` | Let's Encrypt email |
+| `HTTPS_REDIRECT` | `false` | Enable automatic HTTP to HTTPS redirects |
 | `CADDY_ADMIN_URL` | `http://127.0.0.1:2019` | Caddy Admin API URL |
 | `GENERAL_RATE_LIMIT` | `60` | Requests per minute per IP |
 
@@ -251,6 +256,8 @@ environment:
 ```yaml
 environment:
   - CONFIG_MODE=managed  # UI becomes read-only
+  - HTTPS_REDIRECT=true  # Enable automatic redirects
+  - ACME_EMAIL=admin@company.com
   - LB_DOMAINS_api=api.company.com
   - LB_BACKENDS_api=10.0.1.100:8080,10.0.1.101:8080
   - LB_METHOD_api=least_conn

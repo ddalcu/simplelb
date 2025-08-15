@@ -20,6 +20,7 @@ services:
 
       # SSL/TLS Configuration
       - ACME_EMAIL=admin@example.com # Email for Let's Encrypt certificates
+      - HTTPS_REDIRECT=false # Enable automatic HTTP to HTTPS redirects (true/false)
 
       # Caddy Integration
       - CADDY_ADMIN_URL=http://127.0.0.1:2019 # Caddy Admin API URL
