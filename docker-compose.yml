@@ -5,6 +5,7 @@ services:
       - "80:80" # HTTP traffic
       - "443:443" # HTTPS traffic
       - "81:81" # Management web interface (HTTPS)
+      - "2019:2019" # Caddy Admin API (for debugging)
     environment:
       # Management Interface Authentication
       - ADMIN_USERNAME=admin
@@ -18,9 +19,7 @@ services:
       # Rate Limiting Configuration (requests per minute)
       - GENERAL_RATE_LIMIT=60 # All endpoints (60/min)
 
-      # SSL/TLS Configuration
-      - ACME_EMAIL=admin@example.com # Email for Let's Encrypt certificates
-      - HTTPS_REDIRECT=false # Enable automatic HTTP to HTTPS redirects (true/false)
+      # Load balancer listens on both HTTP (80) and HTTPS (443) by default
 
       # Caddy Integration
       - CADDY_ADMIN_URL=http://127.0.0.1:2019 # Caddy Admin API URL
@@ -32,14 +31,14 @@ services:
       # Uncomment and configure as needed:
 
       # Load Balancer Example: API Service
-      - LB_DOMAINS_api=api.example.com,www.api.example.com
-      - LB_BACKENDS_api=192.168.1.100:8080,192.168.1.101:8080,192.168.1.102:8080
-      - LB_METHOD_api=round_robin
+      # - LB_DOMAINS_api=api.example.com,www.api.example.com
+      # - LB_BACKENDS_api=api.github.com:443,jsonplaceholder.typicode.com:443
+      # - LB_METHOD_api=round_robin
 
       # Load Balancer Example: Web Application
-      - LB_DOMAINS_webapp=app.example.com
-      - LB_BACKENDS_webapp=192.168.1.200:3000,192.168.1.201:3000
-      - LB_METHOD_webapp=least_conn
+      # - LB_DOMAINS_webapp=app.example.com
+      # - LB_BACKENDS_webapp=api.github.com:443,jsonplaceholder.typicode.com:443
+      # - LB_METHOD_webapp=least_conn
 
       # Load Balancer Example: Admin Interface
       # - LB_DOMAINS_admin=admin.example.com

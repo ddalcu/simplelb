@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"database/sql"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/sessions"
 	"golang.org/x/time/rate"
+	_ "modernc.org/sqlite"
 )
 
 // Configuration constants
@@ -210,15 +212,278 @@ func (rl *IPRateLimiter) evictOldest() {
 	}
 }
 
+type Config struct {
+	AdminUsername     string
+	AdminPassword     string
+	ManagementPort    string
+	SessionSecret     string
+	SessionSecure     bool
+	CaddyAdminURL     string
+	GeneralRateLimit  int
+	ConfigMode        string
+}
+
 type Application struct {
 	store      *sessions.CookieStore
 	httpClient *http.Client
 	logger     *slog.Logger
 	limiter    *IPRateLimiter
+	db         *sql.DB
+	config     *Config
+}
+
+// LoadBalancer represents a load balancer configuration in the database
+type LoadBalancer struct {
+	ID               int        `json:"id"`
+	Name             string     `json:"name"`
+	Domains          string     `json:"domains"`  // JSON array of domains
+	Backends         string     `json:"backends"` // JSON array of backends
+	Method           string     `json:"method"`
+	HashKey          string     `json:"hash_key,omitempty"`
+	Status           string     `json:"status"`            // configured, active, inactive
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	Source           string     `json:"source"`         // environment, ui, api
+	CaddyDeployed    bool       `json:"caddy_deployed"` // whether it's currently deployed to Caddy
+}
+
+// LoadBalancerStatus represents different states of a load balancer
+const (
+	StatusConfigured = "configured" // Configured in database
+	StatusActive     = "active"     // Deployed to Caddy and active
+	StatusInactive   = "inactive"   // Temporarily disabled
+
+	SourceEnvironment = "environment"
+	SourceUI          = "ui"
+	SourceAPI         = "api"
+)
+
+// initDatabase initializes the SQLite database and creates tables
+func initDatabase() (*sql.DB, error) {
+	// Ensure data directory exists
+	if err := os.MkdirAll("/app/data", 0755); err != nil {
+		return nil, fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	// Open database connection
+	db, err := sql.Open("sqlite", "/app/data/simplelb.db")
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Test connection
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	// Create tables
+	if err := createTables(db); err != nil {
+		return nil, fmt.Errorf("failed to create database tables: %w", err)
+	}
+
+	return db, nil
+}
+
+// createTables creates the necessary database tables
+func createTables(db *sql.DB) error {
+	query := `
+	CREATE TABLE IF NOT EXISTS load_balancers (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL UNIQUE,
+		domains TEXT NOT NULL,
+		backends TEXT NOT NULL,
+		method TEXT NOT NULL DEFAULT 'random',
+		hash_key TEXT,
+		status TEXT NOT NULL DEFAULT 'configured',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		source TEXT NOT NULL DEFAULT 'ui',
+		caddy_deployed BOOLEAN NOT NULL DEFAULT 0
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_load_balancers_name ON load_balancers(name);
+	CREATE INDEX IF NOT EXISTS idx_load_balancers_status ON load_balancers(status);
+	CREATE INDEX IF NOT EXISTS idx_load_balancers_source ON load_balancers(source);
+
+	CREATE TRIGGER IF NOT EXISTS update_load_balancers_updated_at 
+	AFTER UPDATE ON load_balancers
+	BEGIN
+		UPDATE load_balancers SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+	END;
+	`
+
+	_, err := db.Exec(query)
+	return err
+}
+
+// Database helper methods for LoadBalancer
+
+// GetAllLoadBalancers returns all load balancers from the database
+func (app *Application) GetAllLoadBalancers() ([]LoadBalancer, error) {
+	query := `
+	SELECT id, name, domains, backends, method, COALESCE(hash_key, ''), 
+	       status, created_at, updated_at, source, caddy_deployed
+	FROM load_balancers 
+	ORDER BY created_at DESC
+	`
+
+	rows, err := app.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var loadBalancers []LoadBalancer
+	for rows.Next() {
+		var lb LoadBalancer
+
+		err := rows.Scan(
+			&lb.ID, &lb.Name, &lb.Domains, &lb.Backends, &lb.Method, &lb.HashKey,
+			&lb.Status, &lb.CreatedAt, &lb.UpdatedAt, &lb.Source, &lb.CaddyDeployed,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		loadBalancers = append(loadBalancers, lb)
+	}
+
+	return loadBalancers, rows.Err()
+}
+
+// GetLoadBalancerByName returns a load balancer by name
+func (app *Application) GetLoadBalancerByName(name string) (*LoadBalancer, error) {
+	query := `
+	SELECT id, name, domains, backends, method, COALESCE(hash_key, ''), 
+	       status, created_at, updated_at, source, caddy_deployed
+	FROM load_balancers 
+	WHERE name = ?
+	`
+
+	var lb LoadBalancer
+
+	err := app.db.QueryRow(query, name).Scan(
+		&lb.ID, &lb.Name, &lb.Domains, &lb.Backends, &lb.Method, &lb.HashKey,
+		&lb.Status, &lb.CreatedAt, &lb.UpdatedAt, &lb.Source, &lb.CaddyDeployed,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &lb, nil
+}
+
+// CreateLoadBalancer creates a new load balancer in the database
+func (app *Application) CreateLoadBalancer(lb *LoadBalancer) error {
+	query := `
+	INSERT INTO load_balancers (name, domains, backends, method, hash_key, status, source, caddy_deployed)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`
+
+	result, err := app.db.Exec(query, lb.Name, lb.Domains, lb.Backends, lb.Method, lb.HashKey, lb.Status, lb.Source, lb.CaddyDeployed)
+	if err != nil {
+		return err
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	lb.ID = int(id)
+	return nil
+}
+
+// UpdateLoadBalancerDB updates an existing load balancer in the database
+func (app *Application) UpdateLoadBalancerDB(lb *LoadBalancer) error {
+	query := `
+	UPDATE load_balancers 
+	SET domains = ?, backends = ?, method = ?, hash_key = ?, status = ?, caddy_deployed = ?
+	WHERE name = ?
+	`
+
+	_, err := app.db.Exec(query, lb.Domains, lb.Backends, lb.Method, lb.HashKey, lb.Status, lb.CaddyDeployed, lb.Name)
+	return err
+}
+
+// DeleteLoadBalancerDB deletes a load balancer by name from the database
+func (app *Application) DeleteLoadBalancerDB(name string) error {
+	query := `DELETE FROM load_balancers WHERE name = ?`
+	_, err := app.db.Exec(query, name)
+	return err
+}
+
+// GetActiveLoadBalancers returns load balancers that are deployed to Caddy
+func (app *Application) GetActiveLoadBalancers() ([]LoadBalancer, error) {
+	query := `
+	SELECT id, name, domains, backends, method, COALESCE(hash_key, ''), 
+	       status, created_at, updated_at, source, caddy_deployed
+	FROM load_balancers 
+	WHERE caddy_deployed = 1
+	ORDER BY created_at DESC
+	`
+
+	rows, err := app.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var loadBalancers []LoadBalancer
+	for rows.Next() {
+		var lb LoadBalancer
+
+		err := rows.Scan(
+			&lb.ID, &lb.Name, &lb.Domains, &lb.Backends, &lb.Method, &lb.HashKey,
+			&lb.Status, &lb.CreatedAt, &lb.UpdatedAt, &lb.Source, &lb.CaddyDeployed,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		loadBalancers = append(loadBalancers, lb)
+	}
+
+	return loadBalancers, rows.Err()
+}
+
+func loadConfig() *Config {
+	sessionSecure := os.Getenv("SESSION_COOKIE_SECURE") == "1"
+	
+	// Parse rate limit with fallback
+	rateLimit := DefaultRateLimit
+	if envRate := getEnv("GENERAL_RATE_LIMIT", ""); envRate != "" {
+		if parsed := parseInt(envRate, DefaultRateLimit); parsed > 0 {
+			rateLimit = parsed
+		}
+	}
+	
+	return &Config{
+		AdminUsername:     getEnv("ADMIN_USERNAME", DefaultAdminUsername),
+		AdminPassword:     getEnv("ADMIN_PASSWORD", DefaultAdminPassword),
+		ManagementPort:    getEnv("MANAGEMENT_PORT", DefaultManagementPort),
+		SessionSecret:     getEnv("SESSION_SECRET", "default-secret-key-change-this-in-production"),
+		SessionSecure:     sessionSecure,
+		CaddyAdminURL:     getEnv("CADDY_ADMIN_URL", CaddyAdminURL),
+		GeneralRateLimit:  rateLimit,
+		ConfigMode:        strings.ToLower(strings.TrimSpace(getEnv("CONFIG_MODE", ConfigModeInitial))),
+	}
 }
 
 // NewApplication creates a new application instance
 func NewApplication() *Application {
+	config := loadConfig()
+
+	// Initialize database first
+	db, err := initDatabase()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to initialize database: %v", err))
+	}
+
 	// Set up file logging for the application
 	logFile, err := os.OpenFile("/app/data/logs/simplelb/app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -230,40 +495,41 @@ func NewApplication() *Application {
 		Level: slog.LevelInfo,
 	}))
 
-	// Get session secret from environment or use a default (not recommended for production)
-	sessionSecret := os.Getenv("SESSION_SECRET")
-	if sessionSecret == "" {
-		sessionSecret = "default-secret-key-change-this-in-production"
+	if config.SessionSecret == "default-secret-key-change-this-in-production" {
 		logger.Warn("Using default session secret - set SESSION_SECRET environment variable for production")
 	}
 
-	store := sessions.NewCookieStore([]byte(sessionSecret))
+	store := sessions.NewCookieStore([]byte(config.SessionSecret))
 	store.Options = &sessions.Options{
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   86400 * 7,
-		Secure:   os.Getenv("SESSION_COOKIE_SECURE") == "1",
-	}
-
-	// Rate limiting configuration
-	rateLimit := DefaultRateLimit
-	if envRate := getEnv("GENERAL_RATE_LIMIT", ""); envRate != "" {
-		if parsed := parseInt(envRate, DefaultRateLimit); parsed > 0 {
-			rateLimit = parsed
-		}
+		Secure:   config.SessionSecure,
 	}
 
 	// Create rate limiter (rate per minute, with 4x slower refill)
-	limiter := NewIPRateLimiter(rate.Limit(rateLimit) / 60.0 / 4.0)
+	limiter := NewIPRateLimiter(rate.Limit(config.GeneralRateLimit) / 60.0 / 4.0)
 
-	logger.Info("Rate limiting configured", "requests_per_minute", rateLimit)
+	logger.Info("Rate limiting configured", "requests_per_minute", config.GeneralRateLimit)
+
+	// Create simple HTTP client
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 5 * time.Second,
+		}).DialContext,
+	}
 
 	return &Application{
 		store:      store,
-		httpClient: &http.Client{Timeout: RequestTimeout},
+		httpClient: &http.Client{
+			Timeout:   RequestTimeout,
+			Transport: transport,
+		},
 		logger:     logger,
 		limiter:    limiter,
+		db:         db,
+		config:     config,
 	}
 }
 
@@ -277,7 +543,7 @@ func (app *Application) callCaddyAPI(method, path string, body []byte) ([]byte, 
 		reqBody = bytes.NewBuffer(body)
 	}
 
-	baseURL := getEnv("CADDY_ADMIN_URL", CaddyAdminURL)
+	baseURL := app.config.CaddyAdminURL
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(baseURL, "/")+path, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -319,22 +585,22 @@ func (app *Application) getCaddyConfig() (map[string]interface{}, error) {
 	return config, nil
 }
 
-// getConfigMode returns the configuration mode from environment
-func getConfigMode() string {
-	mode := strings.ToLower(strings.TrimSpace(getEnv("CONFIG_MODE", ConfigModeInitial)))
-	if mode != ConfigModeInitial && mode != ConfigModeManaged {
-		return ConfigModeInitial
-	}
-	return mode
-}
+
 
 // parseEnvironmentLoadBalancers discovers and parses LB_* environment variables
 func (app *Application) parseEnvironmentLoadBalancers() ([]EnvironmentLoadBalancer, error) {
 	var loadBalancers []EnvironmentLoadBalancer
 	nameMap := make(map[string]*EnvironmentLoadBalancer)
 
+	envCount := 0
+	lbCount := 0
+
 	// Scan all environment variables for LB_ patterns
 	for _, env := range os.Environ() {
+		envCount++
+		if strings.HasPrefix(env, "LB_") {
+			lbCount++
+		}
 		parts := strings.SplitN(env, "=", 2)
 		if len(parts) != 2 {
 			continue
@@ -377,6 +643,7 @@ func (app *Application) parseEnvironmentLoadBalancers() ([]EnvironmentLoadBalanc
 		}
 	}
 
+
 	// Validate and collect load balancers
 	for name, lb := range nameMap {
 		// Validate required fields
@@ -389,101 +656,25 @@ func (app *Application) parseEnvironmentLoadBalancers() ([]EnvironmentLoadBalanc
 			continue
 		}
 
+		// Store all environment load balancers in database
+		// They can be deployed later via the UI
+
 		// Set default method if not specified
 		if lb.Method == "" {
 			lb.Method = "random"
 		}
 
 		loadBalancers = append(loadBalancers, *lb)
-		app.logger.Info("Discovered environment load balancer",
-			"name", name,
-			"domains", lb.Domains,
-			"method", lb.Method,
-			"backend_count", len(strings.Split(lb.Backends, ",")))
 	}
 
 	return loadBalancers, nil
 }
 
-// Simplified casting helpers
-func asMap(v interface{}) map[string]interface{} {
-	if m, ok := v.(map[string]interface{}); ok {
-		return m
-	}
-	return nil
-}
-
-func asArray(v interface{}) []interface{} {
-	if a, ok := v.([]interface{}); ok {
-		return a
-	}
-	return nil
-}
-
-func asString(v interface{}) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return ""
-}
 
 // Get routes directly from Caddy HTTP server routes endpoint
-func (app *Application) getCaddyRoutes() ([]CaddyRoute, error) {
-	respBody, err := app.callCaddyAPI("GET", "/config/apps/http/servers/main/routes", nil)
-	if err != nil {
-		return []CaddyRoute{}, nil
-	}
-	var routes []CaddyRoute
-	if err := json.Unmarshal(respBody, &routes); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal routes: %w", err)
-	}
-	return routes, nil
-}
-
-func (app *Application) getLoadBalancers() ([]map[string]interface{}, error) {
-	routes, err := app.getCaddyRoutes()
-	if err != nil {
-		return nil, err
-	}
-	var loadBalancers []map[string]interface{}
-	for _, route := range routes {
-		if lb := app.parseRouteToLoadBalancer(route); lb != nil {
-			loadBalancers = append(loadBalancers, lb)
-		}
-	}
-	return loadBalancers, nil
-}
-
-// Extract domains from route match - supports multiple hosts
-func (app *Application) parseRouteToLoadBalancer(route CaddyRoute) map[string]interface{} {
-	if len(route.Match) == 0 || len(route.Match[0].Host) == 0 {
-		return nil
-	}
-	hosts := route.Match[0].Host
-	if len(route.Handle) == 0 || route.Handle[0].Handler != "reverse_proxy" {
-		return nil
-	}
-	var backends []string
-	for _, u := range route.Handle[0].Upstreams {
-		if strings.TrimSpace(u.Dial) != "" {
-			backends = append(backends, u.Dial)
-		}
-	}
-	method := "random"
-	if lb := route.Handle[0].LoadBalancing; lb != nil && lb.SelectionPolicy != nil && strings.TrimSpace(lb.SelectionPolicy.Policy) != "" {
-		method = lb.SelectionPolicy.Policy
-	}
-	return map[string]interface{}{
-		"domain":   hosts[0], // Primary domain for compatibility
-		"domains":  hosts,    // All domains
-		"backends": backends,
-		"method":   method,
-	}
-}
 
 func (app *Application) initializeCaddyConfig() error {
-	configMode := getConfigMode()
-	app.logger.Info("Initializing Caddy configuration", "mode", configMode)
+	app.logger.Info("Initializing Caddy configuration", "mode", app.config.ConfigMode)
 
 	// Parse environment load balancers
 	envLoadBalancers, err := app.parseEnvironmentLoadBalancers()
@@ -493,7 +684,7 @@ func (app *Application) initializeCaddyConfig() error {
 	}
 
 	// Handle configuration based on mode
-	switch configMode {
+	switch app.config.ConfigMode {
 	case ConfigModeManaged:
 		// In managed mode, always apply environment configuration
 		app.logger.Info("Managed mode: applying environment configuration", "load_balancer_count", len(envLoadBalancers))
@@ -503,7 +694,7 @@ func (app *Application) initializeCaddyConfig() error {
 		// In initial mode, try to load saved config first
 		if app.loadSavedConfigIfExists() {
 			// Saved config loaded successfully, only apply environment config if no load balancers exist
-			existingLBs, err := app.getLoadBalancers()
+			existingLBs, err := app.GetAllLoadBalancers()
 			if err != nil {
 				app.logger.Warn("Failed to check existing load balancers", "error", err)
 			} else if len(existingLBs) == 0 && len(envLoadBalancers) > 0 {
@@ -522,13 +713,37 @@ func (app *Application) initializeCaddyConfig() error {
 
 		if len(envLoadBalancers) > 0 {
 			app.logger.Info("Applying initial environment configuration", "count", len(envLoadBalancers))
-			return app.applyEnvironmentLoadBalancers(envLoadBalancers)
+			// Store in database
+			if err := app.applyEnvironmentLoadBalancers(envLoadBalancers); err != nil {
+				return err
+			}
+			
+			// Deploy to Caddy
+			for _, envLB := range envLoadBalancers {
+				req := LoadBalancerRequest{
+					Domain:   envLB.Domains,
+					Backends: envLB.Backends,
+					Method:   envLB.Method,
+				}
+				if err := app.createLoadBalancerInternal(req); err != nil {
+					app.logger.Error("Failed to deploy load balancer to Caddy", "name", envLB.Name, "error", err)
+				} else {
+					app.logger.Info("Deployed load balancer to Caddy", "name", envLB.Name)
+					// Mark as deployed in database
+					if lb, err := app.GetLoadBalancerByName(envLB.Name); err == nil && lb != nil {
+						lb.CaddyDeployed = true
+						if err := app.UpdateLoadBalancerDB(lb); err != nil {
+							app.logger.Error("Failed to update deployment status", "name", envLB.Name, "error", err)
+						}
+					}
+				}
+			}
 		}
 
 		return nil
 	}
 
-	return fmt.Errorf("unknown configuration mode: %s", configMode)
+	return fmt.Errorf("unknown configuration mode: %s", app.config.ConfigMode)
 }
 
 // loadSavedConfigIfExists attempts to load saved configuration and returns true if successful
@@ -556,64 +771,68 @@ func (app *Application) loadSavedConfigIfExists() bool {
 	return true
 }
 
-// getHTTPSRedirectEnabled returns whether HTTPS redirects should be enabled
-func getHTTPSRedirectEnabled() bool {
-	value := strings.ToLower(strings.TrimSpace(getEnv("HTTPS_REDIRECT", "false")))
-	return value == "true" || value == "1" || value == "yes" || value == "on"
-}
 
 // initializeFreshCaddyConfig sets up a minimal base Caddy configuration
 func (app *Application) initializeFreshCaddyConfig() error {
-	// Determine if HTTPS redirects should be enabled
-	httpsRedirect := getHTTPSRedirectEnabled()
+	// Always listen on both HTTP and HTTPS ports
+	// First ensure wildcard certificate exists for HTTPS
+	if err := app.ensureWildcardCertificate(); err != nil {
+		app.logger.Error("Failed to ensure wildcard certificate", "error", err)
+		return fmt.Errorf("failed to ensure wildcard certificate: %w", err)
+	}
 
-	// Server configuration
+	// Configure server to listen on both ports
 	serverConfig := map[string]interface{}{
 		"listen": []string{":80", ":443"},
 		"routes": []interface{}{},
-	}
-
-	// Add automatic HTTPS redirect configuration if enabled
-	if httpsRedirect {
-		serverConfig["automatic_https"] = map[string]interface{}{
-			"disable_redirects": false,
-		}
-		app.logger.Info("HTTPS redirects enabled for all domains")
-	} else {
-		serverConfig["automatic_https"] = map[string]interface{}{
-			"disable_redirects": true,
-		}
-		app.logger.Info("HTTPS redirects disabled")
-	}
-
-	initial := map[string]interface{}{
-		"apps": map[string]interface{}{
-			"http": map[string]interface{}{
-				"servers": map[string]interface{}{
-					"main": serverConfig,
-				},
-				"https_port":     443,
-				"http_port":      80,
-				"grace_period":   "5s",
-				"shutdown_delay": "5s",
+		"automatic_https": map[string]interface{}{
+			"disable_redirects": true,  // Don't automatically redirect HTTP to HTTPS
+			"skip": []string{"*"},      // Skip automatic HTTPS for all hosts
+		},
+		"logs": map[string]interface{}{
+			"logger_names": map[string]string{
+				"default": "access",
 			},
-			"tls": map[string]interface{}{
-				"automation": map[string]interface{}{
-					"policies": func() []interface{} {
-						email := strings.TrimSpace(os.Getenv("ACME_EMAIL"))
-						issuer := map[string]interface{}{"module": "acme"}
-						if email != "" {
-							issuer["email"] = email
-						}
-						return []interface{}{
-							map[string]interface{}{
-								"issuers": []interface{}{issuer},
-							},
-						}
-					}(),
+		},
+		"tls_connection_policies": []interface{}{
+			map[string]interface{}{
+				"certificate_selection": map[string]interface{}{
+					"any_tag": []string{"wildcard"},
 				},
 			},
 		},
+	}
+
+	// Add TLS app with wildcard certificate
+	tlsApp := map[string]interface{}{
+		"certificates": map[string]interface{}{
+			"load_files": []interface{}{
+				map[string]interface{}{
+					"certificate": "/app/data/certs/wildcard.crt",
+					"key":         "/app/data/certs/wildcard.key",
+					"tags":        []string{"wildcard"},
+				},
+			},
+		},
+	}
+
+	app.logger.Info("HTTP and HTTPS enabled on ports 80 and 443")
+
+	apps := map[string]interface{}{
+		"http": map[string]interface{}{
+			"servers": map[string]interface{}{
+				"main": serverConfig,
+			},
+			"https_port":     443,
+			"http_port":      80,
+			"grace_period":   "5s",
+			"shutdown_delay": "5s",
+		},
+		"tls": tlsApp,
+	}
+
+	initial := map[string]interface{}{
+		"apps": apps,
 		"logging": map[string]interface{}{
 			"logs": map[string]interface{}{
 				"default": map[string]interface{}{
@@ -630,6 +849,7 @@ func (app *Application) initializeFreshCaddyConfig() error {
 					},
 					"encoder": map[string]interface{}{
 						"format": "json",
+						"time_format": "iso8601",
 					},
 				},
 			},
@@ -650,13 +870,42 @@ func (app *Application) initializeFreshCaddyConfig() error {
 
 // applyEnvironmentConfiguration applies environment load balancers in managed mode
 func (app *Application) applyEnvironmentConfiguration(envLoadBalancers []EnvironmentLoadBalancer) error {
-	// Initialize fresh config (ignoring saved config)
+	// Initialize fresh config first (ignoring saved config)
 	if err := app.initializeFreshCaddyConfig(); err != nil {
 		return fmt.Errorf("failed to initialize fresh config: %w", err)
 	}
 
-	// Apply environment load balancers
-	return app.applyEnvironmentLoadBalancers(envLoadBalancers)
+	// Store environment load balancers in database and deploy to Caddy
+	if err := app.applyEnvironmentLoadBalancers(envLoadBalancers); err != nil {
+		return fmt.Errorf("failed to apply environment load balancers: %w", err)
+	}
+
+	// Now deploy all load balancers from database to Caddy
+	allLBs, err := app.GetAllLoadBalancers()
+	if err != nil {
+		return fmt.Errorf("failed to get load balancers from database: %w", err)
+	}
+
+	for _, lb := range allLBs {
+		req := LoadBalancerRequest{
+			Domain:   lb.Domains,
+			Backends: lb.Backends,
+			Method:   lb.Method,
+		}
+		if err := app.createLoadBalancerInternal(req); err != nil {
+			app.logger.Error("Failed to deploy load balancer to Caddy", "name", lb.Name, "error", err)
+		} else {
+			app.logger.Info("Deployed load balancer to Caddy", "name", lb.Name)
+			// Mark as deployed in database
+			lb.CaddyDeployed = true
+			if err := app.UpdateLoadBalancerDB(&lb); err != nil {
+				app.logger.Error("Failed to update deployment status", "name", lb.Name, "error", err)
+			}
+		}
+	}
+
+	app.logger.Info("Environment configuration applied in managed mode", "count", len(envLoadBalancers))
+	return nil
 }
 
 // applyEnvironmentLoadBalancers creates load balancers from environment configuration
@@ -669,37 +918,67 @@ func (app *Application) applyEnvironmentLoadBalancers(envLoadBalancers []Environ
 	successCount := 0
 
 	for _, envLB := range envLoadBalancers {
-		req := LoadBalancerRequest{
-			Domain:   envLB.Domains,
-			Backends: envLB.Backends,
-			Method:   envLB.Method,
+		// Check if load balancer already exists in database
+		existing, err := app.GetLoadBalancerByName(envLB.Name)
+		if err != nil {
+			app.logger.Warn("Error checking existing load balancer", "name", envLB.Name, "error", err)
 		}
 
-		// Use internal create method that doesn't call initializeCaddyConfig again
-		if err := app.createLoadBalancerInternal(req); err != nil {
-			errorMsg := fmt.Sprintf("Failed to create load balancer '%s': %v", envLB.Name, err)
-			app.logger.Error(errorMsg)
-			errors = append(errors, errorMsg)
+		// Convert domains and backends to JSON for database storage
+		domainList := strings.Split(envLB.Domains, ",")
+		for i, domain := range domainList {
+			domainList[i] = strings.TrimSpace(domain)
+		}
+		backendList := strings.Split(envLB.Backends, ",")
+		for i, backend := range backendList {
+			backendList[i] = strings.TrimSpace(backend)
+		}
+		
+		domainsJSON := marshalStringSlice(domainList)
+		backendsJSON := marshalStringSlice(backendList)
+
+		// Create LoadBalancer object
+		lb := &LoadBalancer{
+			Name:             envLB.Name,
+			Domains:          string(domainsJSON),
+			Backends:         string(backendsJSON),
+			Method:           envLB.Method,
+			Status:           StatusConfigured,
+			Source:           SourceEnvironment,
+			CaddyDeployed:    false,
+		}
+
+		if existing != nil {
+			// Update existing load balancer
+			lb.ID = existing.ID
+			if err := app.UpdateLoadBalancerDB(lb); err != nil {
+				errorMsg := fmt.Sprintf("Failed to update load balancer '%s': %v", envLB.Name, err)
+				app.logger.Error(errorMsg)
+				errors = append(errors, errorMsg)
+				continue
+			}
+			app.logger.Info("Updated environment load balancer in database", "name", envLB.Name)
 		} else {
-			successCount++
-			app.logger.Info("Successfully created environment load balancer", "name", envLB.Name, "domains", envLB.Domains)
+			// Create new load balancer
+			if err := app.CreateLoadBalancer(lb); err != nil {
+				errorMsg := fmt.Sprintf("Failed to create load balancer '%s': %v", envLB.Name, err)
+				app.logger.Error(errorMsg)
+				errors = append(errors, errorMsg)
+				continue
+			}
+			app.logger.Info("Created environment load balancer in database", "name", envLB.Name)
 		}
+
+		successCount++
 	}
 
-	// Save configuration after applying environment load balancers
-	if successCount > 0 {
-		if err := app.saveConfig(); err != nil {
-			app.logger.Warn("Failed to save config after applying environment load balancers", "error", err)
-		}
-	}
-
-	app.logger.Info("Environment load balancer application complete",
+	app.logger.Info("Environment load balancer storage complete",
 		"successful", successCount,
 		"failed", len(errors),
 		"total", len(envLoadBalancers))
 
 	if len(errors) > 0 && successCount == 0 {
-		return fmt.Errorf("failed to create any environment load balancers: %s", strings.Join(errors, "; "))
+		return fmt.Errorf("failed to store any environment load balancers: %s", strings.Join(errors, "; "))
 	}
 
 	return nil
@@ -790,41 +1069,6 @@ func (app *Application) createLoadBalancerInternal(req LoadBalancerRequest) erro
 	return nil
 }
 
-// Find route index by domain - handles multiple hosts
-func (app *Application) deleteLoadBalancer(domain string) error {
-	routes, err := app.getCaddyRoutes()
-	if err != nil {
-		return err
-	}
-
-	var indices []int
-	for i, route := range routes {
-		if len(route.Match) > 0 && len(route.Match[0].Host) > 0 {
-			// Check if the domain is in the host list
-			for _, host := range route.Match[0].Host {
-				if host == domain {
-					indices = append(indices, i)
-					break // Found the route, no need to check other hosts
-				}
-			}
-		}
-	}
-	if len(indices) == 0 {
-		return fmt.Errorf("load balancer not found")
-	}
-
-	sort.Sort(sort.Reverse(sort.IntSlice(indices)))
-	for _, idx := range indices {
-		if _, err := app.callCaddyAPI("DELETE", fmt.Sprintf("/config/apps/http/servers/main/routes/%d", idx), nil); err != nil {
-			return fmt.Errorf("failed to delete route %d: %w", idx, err)
-		}
-	}
-
-	if err := app.saveConfig(); err != nil {
-		app.logger.Warn("Failed to save config after deletion", "error", err)
-	}
-	return nil
-}
 
 // saveConfig saves the current Caddy configuration to disk for persistence
 func (app *Application) saveConfig() error {
@@ -919,8 +1163,8 @@ func (app *Application) HandleLogin(c *gin.Context) {
 	username := strings.TrimSpace(c.PostForm("username"))
 	password := c.PostForm("password")
 
-	expectedUser := getEnv("ADMIN_USERNAME", DefaultAdminUsername)
-	expectedPass := getEnv("ADMIN_PASSWORD", DefaultAdminPassword)
+	expectedUser := app.config.AdminUsername
+	expectedPass := app.config.AdminPassword
 
 	if username == expectedUser && password == expectedPass {
 		session, err := app.store.Get(c.Request, SessionName)
@@ -944,26 +1188,96 @@ func (app *Application) HandleLogin(c *gin.Context) {
 	}
 }
 
-func (app *Application) ShowDashboard(c *gin.Context) {
-	loadBalancers, err := app.getLoadBalancers()
+// restoreDeployedLoadBalancers restores deployed load balancers from database on startup
+func (app *Application) restoreDeployedLoadBalancers() error {
+	// Get all deployed load balancers from database
+	deployedLoadBalancers, err := app.GetActiveLoadBalancers()
 	if err != nil {
-		app.logger.Error("Failed to get load balancers", "error", err)
-		loadBalancers = []map[string]interface{}{}
+		return fmt.Errorf("failed to get deployed load balancers: %w", err)
 	}
 
-	configMode := getConfigMode()
-	isManaged := configMode == ConfigModeManaged
+	if len(deployedLoadBalancers) == 0 {
+		app.logger.Info("No deployed load balancers found to restore")
+		return nil
+	}
+
+	app.logger.Info("Restoring deployed load balancers", "count", len(deployedLoadBalancers))
+
+	// Regenerate and apply Caddyfile with deployed load balancers
+	if err := app.applyCaddyfile(); err != nil {
+		return fmt.Errorf("failed to apply Caddyfile during restoration: %w", err)
+	}
+
+	// Log restored load balancers
+	for _, lb := range deployedLoadBalancers {
+		var domains []string
+		if err := json.Unmarshal([]byte(lb.Domains), &domains); err == nil {
+			app.logger.Info("Restored deployed load balancer", 
+				"name", lb.Name, 
+				"domains", strings.Join(domains, ","),
+				"status", lb.Status)
+		}
+	}
+
+	return nil
+}
+
+func (app *Application) ShowDashboard(c *gin.Context) {
+	// Get all load balancers from database
+	dbLoadBalancers, err := app.GetAllLoadBalancers()
+	if err != nil {
+		app.logger.Error("Failed to get load balancers from database", "error", err)
+		c.HTML(http.StatusInternalServerError, "dashboard.html", gin.H{
+			"error": "Failed to load load balancers",
+		})
+		return
+	}
+
+	// Convert database load balancers to template format
+	loadBalancers := make([]map[string]interface{}, len(dbLoadBalancers))
+	for i, lb := range dbLoadBalancers {
+		// Parse domains from JSON
+		var domains []string
+		if err := json.Unmarshal([]byte(lb.Domains), &domains); err != nil {
+			app.logger.Warn("Failed to parse domains for load balancer", "name", lb.Name, "error", err)
+			domains = []string{lb.Domains} // Fallback to raw string
+		}
+
+		// Parse backends from JSON
+		var backends []string
+		if err := json.Unmarshal([]byte(lb.Backends), &backends); err != nil {
+			app.logger.Warn("Failed to parse backends for load balancer", "name", lb.Name, "error", err)
+			backends = []string{lb.Backends} // Fallback to raw string
+		}
+
+		loadBalancers[i] = map[string]interface{}{
+			"id":             lb.ID,
+			"name":           lb.Name,
+			"domain":         strings.Join(domains, ", "),
+			"domains":        domains,
+			"backends":       backends,
+			"method":         lb.Method,
+			"hash_key":       lb.HashKey,
+			"status":         lb.Status,
+			"created_at":     lb.CreatedAt,
+			"updated_at":     lb.UpdatedAt,
+			"source":         lb.Source,
+			"caddy_deployed": lb.CaddyDeployed,
+		}
+	}
+
+	isManaged := app.config.ConfigMode == ConfigModeManaged
 
 	c.HTML(http.StatusOK, "dashboard.html", gin.H{
 		"loadBalancers": loadBalancers,
-		"configMode":    configMode,
+		"configMode":    app.config.ConfigMode,
 		"isManaged":     isManaged,
 	})
 }
 
 func (app *Application) AddLoadBalancer(c *gin.Context) {
 	// Check if configuration is managed
-	if getConfigMode() == ConfigModeManaged {
+	if app.config.ConfigMode == ConfigModeManaged {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Configuration is managed via environment variables. Editing is disabled."})
 		return
 	}
@@ -981,14 +1295,28 @@ func (app *Application) AddLoadBalancer(c *gin.Context) {
 		return
 	}
 
-	// Validate each domain
+	// Basic domain format validation
 	domains := strings.Split(strings.TrimSpace(req.Domain), ",")
+	var cleanDomains []string
+
 	for _, domain := range domains {
 		domain = strings.TrimSpace(domain)
-		if domain != "" && !strings.Contains(domain, ".") {
+		if domain == "" {
+			continue
+		}
+
+		// Basic format validation
+		if !strings.Contains(domain, ".") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid domain format: " + domain})
 			return
 		}
+
+		cleanDomains = append(cleanDomains, domain)
+	}
+
+	if len(cleanDomains) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one valid domain is required"})
+		return
 	}
 
 	if req.Backends == "" {
@@ -996,63 +1324,119 @@ func (app *Application) AddLoadBalancer(c *gin.Context) {
 		return
 	}
 
-	if err := app.createLoadBalancer(req); err != nil {
+	// Parse and validate backends
+	backendList := strings.Split(strings.TrimSpace(req.Backends), ",")
+	var cleanBackends []string
+
+	for _, backend := range backendList {
+		backend = strings.TrimSpace(backend)
+		if backend == "" {
+			continue
+		}
+		cleanBackends = append(cleanBackends, backend)
+	}
+
+	if len(cleanBackends) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one valid backend is required"})
+		return
+	}
+
+	// Generate unique name for the load balancer (use primary domain)
+	name := cleanDomains[0]
+
+	// Check if load balancer already exists
+	existing, err := app.GetLoadBalancerByName(name)
+	if err != nil {
+		app.logger.Error("Failed to check existing load balancer", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing load balancer"})
+		return
+	}
+
+	if existing != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "Load balancer with this domain already exists"})
+		return
+	}
+
+	// Convert to JSON for database storage
+	domainsJSON := marshalStringSlice(cleanDomains)
+	backendsJSON := marshalStringSlice(cleanBackends)
+
+	// Create LoadBalancer object
+	lb := &LoadBalancer{
+		Name:             name,
+		Domains:          string(domainsJSON),
+		Backends:         string(backendsJSON),
+		Method:           req.Method,
+		HashKey:          req.HashKey,
+		Status:           StatusConfigured,
+		Source:           SourceUI,
+		CaddyDeployed:    false,
+	}
+
+	// Save to database
+	if err := app.CreateLoadBalancer(lb); err != nil {
 		app.logger.Error("Failed to create load balancer", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create load balancer"})
 		return
 	}
 
-	app.logger.Info("Created load balancer", "domain", req.Domain)
+	app.logger.Info("Created load balancer", "name", name, "domains", cleanDomains)
 	c.Redirect(http.StatusSeeOther, "/dashboard")
 }
 
 func (app *Application) GetLoadBalancer(c *gin.Context) {
-	domain := c.Param("domain")
+	name := c.Param("name")
 
-	// Find the load balancer
-	loadBalancers, err := app.getLoadBalancers()
+	// Get load balancer from database
+	lb, err := app.GetLoadBalancerByName(name)
 	if err != nil {
-		app.logger.Error("Failed to get load balancers", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get load balancers"})
+		app.logger.Error("Failed to get load balancer", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get load balancer"})
 		return
 	}
 
-	for _, lb := range loadBalancers {
-		if lbDomain, ok := lb["domain"].(string); ok && lbDomain == domain {
-			// Convert backends array to string
-			backends := []string{}
-			if backendsArray, ok := lb["backends"].([]string); ok {
-				backends = backendsArray
-			}
-
-			// Convert domains array to comma-separated string
-			domainString := domain // fallback to primary domain
-			if domainsArray, ok := lb["domains"].([]string); ok && len(domainsArray) > 0 {
-				domainString = strings.Join(domainsArray, ", ")
-			}
-
-			response := map[string]interface{}{
-				"domain":   domainString,
-				"method":   lb["method"],
-				"backends": strings.Join(backends, "\n"),
-			}
-
-			c.JSON(http.StatusOK, response)
-			return
-		}
+	if lb == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Load balancer not found"})
+		return
 	}
 
-	c.JSON(http.StatusNotFound, gin.H{"error": "Load balancer not found"})
+	// Parse domains from JSON
+	var domains []string
+	if err := json.Unmarshal([]byte(lb.Domains), &domains); err != nil {
+		app.logger.Warn("Failed to parse domains for load balancer", "name", lb.Name, "error", err)
+		domains = []string{lb.Domains} // Fallback to raw string
+	}
+
+	// Parse backends from JSON
+	var backends []string
+	if err := json.Unmarshal([]byte(lb.Backends), &backends); err != nil {
+		app.logger.Warn("Failed to parse backends for load balancer", "name", lb.Name, "error", err)
+		backends = []string{lb.Backends} // Fallback to raw string
+	}
+
+	response := map[string]interface{}{
+		"name":     lb.Name,
+		"domain":   strings.Join(domains, ", "),
+		"method":   lb.Method,
+		"backends": strings.Join(backends, "\n"),
+	}
+
+	// Add hash_key if the method supports it
+	if lb.Method == "ip_hash" || lb.Method == "header" || lb.Method == "cookie" {
+		response["hash_key"] = lb.HashKey
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 func (app *Application) UpdateLoadBalancer(c *gin.Context) {
 	// Check if configuration is managed
-	if getConfigMode() == ConfigModeManaged {
+	if app.config.ConfigMode == ConfigModeManaged {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Configuration is managed via environment variables. Editing is disabled."})
 		return
 	}
 
-	domain := c.Param("domain")
+	name := c.Param("name")
 
 	req := LoadBalancerRequest{
 		Domain:   strings.TrimSpace(c.PostForm("domain")),
@@ -1082,335 +1466,255 @@ func (app *Application) UpdateLoadBalancer(c *gin.Context) {
 		return
 	}
 
-	// Replace: delete old, create new
-	if err := app.deleteLoadBalancer(domain); err != nil {
-		app.logger.Error("Delete failed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Update failed"})
+	// Get existing load balancer from database
+	existingLB, err := app.GetLoadBalancerByName(name)
+	if err != nil {
+		app.logger.Error("Failed to get existing load balancer", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get load balancer"})
 		return
 	}
 
-	if err := app.createLoadBalancer(req); err != nil {
-		app.logger.Error("Create failed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Update failed"})
+	if existingLB == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Load balancer not found"})
 		return
 	}
 
-	app.logger.Info("Updated load balancer", "domain", req.Domain)
+	// Parse and clean domains
+	cleanDomains := strings.Split(strings.TrimSpace(req.Domain), ",")
+	for i, domain := range cleanDomains {
+		cleanDomains[i] = strings.TrimSpace(domain)
+	}
+
+	// Parse and clean backends
+	cleanBackends := strings.Split(strings.TrimSpace(req.Backends), "\n")
+	for i, backend := range cleanBackends {
+		cleanBackends[i] = strings.TrimSpace(backend)
+	}
+
+	// Update the load balancer in database
+	existingLB.Domains = "[\"" + strings.Join(cleanDomains, "\",\"") + "\"]"
+	existingLB.Backends = "[\"" + strings.Join(cleanBackends, "\",\"") + "\"]"
+	existingLB.Method = req.Method
+	existingLB.HashKey = req.HashKey
+	existingLB.Status = StatusConfigured // Reset to configured since it was modified
+
+	if err := app.UpdateLoadBalancerDB(existingLB); err != nil {
+		app.logger.Error("Failed to update load balancer in database", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update load balancer"})
+		return
+	}
+
+	app.logger.Info("Updated load balancer in database", "name", name, "domains", cleanDomains)
 	c.Redirect(http.StatusSeeOther, "/dashboard")
 }
 
 func (app *Application) DeleteLoadBalancer(c *gin.Context) {
 	// Check if configuration is managed
-	if getConfigMode() == ConfigModeManaged {
+	if app.config.ConfigMode == ConfigModeManaged {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Configuration is managed via environment variables. Editing is disabled."})
 		return
 	}
 
-	domain := c.Param("domain")
+	name := c.Param("name")
 
-	if err := app.deleteLoadBalancer(domain); err != nil {
-		app.logger.Error("Failed to delete load balancer", "error", err, "domain", domain)
+	// Delete from database
+	if err := app.DeleteLoadBalancerDB(name); err != nil {
+		app.logger.Error("Failed to delete load balancer from database", "error", err, "name", name)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to delete load balancer: %v", err)})
 		return
 	}
 
-	app.logger.Info("Deleted load balancer", "domain", domain)
+	app.logger.Info("Deleted load balancer from database", "name", name)
 	c.Redirect(http.StatusSeeOther, "/dashboard")
 }
 
-// Certificate status structure
-type CertificateStatus struct {
-	Domain        string `json:"domain"`
-	Status        string `json:"status"`        // "valid", "expired", "expiring_soon", "invalid", "unknown"
-	ExpiryDate    string `json:"expiry_date"`   // ISO format date
-	DaysUntilExp  int    `json:"days_until_exp"`
-	Issuer        string `json:"issuer"`
-	ErrorMessage  string `json:"error_message,omitempty"`
-}
 
-// getCertificateStatus retrieves certificate status for domains from Caddy TLS app
-func (app *Application) getCertificateStatus(domains []string) map[string]CertificateStatus {
-	statusMap := make(map[string]CertificateStatus)
-	
-	// Initialize all domains with unknown status
-	for _, domain := range domains {
-		statusMap[domain] = CertificateStatus{
-			Domain: domain,
-			Status: "unknown",
-			ErrorMessage: "Certificate status not available",
-		}
-	}
 
-	// Try to get TLS app configuration from Caddy
-	respBody, err := app.callCaddyAPI("GET", "/config/apps/tls", nil)
+// getLoadBalancerWithDomains is a helper that fetches a load balancer and parses its domains
+func (app *Application) getLoadBalancerWithDomains(c *gin.Context, name string) (*LoadBalancer, []string, bool) {
+	lb, err := app.GetLoadBalancerByName(name)
 	if err != nil {
-		app.logger.Warn("Failed to get TLS config for certificate status", "error", err)
-		return statusMap
+		app.logger.Error("Failed to get load balancer", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get load balancer"})
+		return nil, nil, false
 	}
 
-	var tlsConfig map[string]interface{}
-	if err := json.Unmarshal(respBody, &tlsConfig); err != nil {
-		app.logger.Warn("Failed to unmarshal TLS config", "error", err)
-		return statusMap
+	if lb == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Load balancer not found"})
+		return nil, nil, false
 	}
 
-	// Try to get certificate cache information
-	certCacheResp, err := app.callCaddyAPI("GET", "/config/apps/tls/certificates", nil)
-	if err == nil {
-		var certCache interface{}
-		if err := json.Unmarshal(certCacheResp, &certCache); err == nil {
-			// Parse certificate cache data if available
-			app.parseCertificateCache(certCache, statusMap)
-		}
+	var domains []string
+	if err := json.Unmarshal([]byte(lb.Domains), &domains); err != nil {
+		app.logger.Error("Failed to parse domains", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse domains"})
+		return nil, nil, false
 	}
 
-	// For domains without certificate information, check if they're configured for automation
-	app.checkAutomationPolicies(tlsConfig, statusMap)
-
-	return statusMap
+	return lb, domains, true
 }
 
-// parseCertificateCache parses certificate cache data from Caddy
-func (app *Application) parseCertificateCache(certCache interface{}, statusMap map[string]CertificateStatus) {
-	// This function would parse the certificate cache data structure
-	// Since the exact structure may vary, we'll implement a basic version
-	// In production, this would need to be adapted based on Caddy's actual response format
+// DeployLoadBalancer deploys a load balancer to Caddy
+func (app *Application) DeployLoadBalancer(c *gin.Context) {
+	name := c.Param("name")
 	
-	if cacheMap, ok := certCache.(map[string]interface{}); ok {
-		for _, cert := range cacheMap {
-			if certData, ok := cert.(map[string]interface{}); ok {
-				// Extract certificate information if available
-				app.extractCertificateInfo(certData, statusMap)
-			}
-		}
-	}
-}
-
-// extractCertificateInfo extracts certificate information from Caddy's response
-func (app *Application) extractCertificateInfo(certData map[string]interface{}, statusMap map[string]CertificateStatus) {
-	// This is a simplified implementation - the actual structure would depend on
-	// Caddy's certificate cache format
-	if names, ok := certData["names"].([]interface{}); ok {
-		for _, name := range names {
-			if domainName, ok := name.(string); ok {
-				if status, exists := statusMap[domainName]; exists {
-					status.Status = "configured"
-					status.ErrorMessage = ""
-					statusMap[domainName] = status
-				}
-			}
-		}
-	}
-}
-
-// checkAutomationPolicies checks if domains are configured for automatic certificate management
-func (app *Application) checkAutomationPolicies(tlsConfig map[string]interface{}, statusMap map[string]CertificateStatus) {
-	automation := asMap(tlsConfig["automation"])
-	if automation == nil {
+	lb, domains, ok := app.getLoadBalancerWithDomains(c, name)
+	if !ok {
 		return
 	}
 
-	policies := asArray(automation["policies"])
-	if policies == nil {
+	// Parse backends from JSON
+	var backends []string
+	if err := json.Unmarshal([]byte(lb.Backends), &backends); err != nil {
+		app.logger.Error("Failed to parse backends", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse backends"})
 		return
 	}
 
-	for _, policy := range policies {
-		policyMap := asMap(policy)
-		if policyMap == nil {
-			continue
-		}
+	// Update status in database first
+	lb.Status = StatusActive
+	lb.CaddyDeployed = true
 
-		subjects := asArray(policyMap["subjects"])
-		if subjects == nil {
-			continue
-		}
-
-		// Check if any of our domains are in this policy's subjects
-		for _, subject := range subjects {
-			if subjectStr := asString(subject); subjectStr != "" {
-				if status, exists := statusMap[subjectStr]; exists {
-					status.Status = "automated"
-					status.ErrorMessage = ""
-					
-					// Check for issuers to determine the CA
-					if issuers := asArray(policyMap["issuers"]); issuers != nil && len(issuers) > 0 {
-						if issuer := asMap(issuers[0]); issuer != nil {
-							if module := asString(issuer["module"]); module == "acme" {
-								status.Issuer = "Let's Encrypt"
-							} else {
-								status.Issuer = strings.Title(module)
-							}
-						}
-					}
-					
-					statusMap[subjectStr] = status
-				}
-			}
-		}
-	}
-}
-
-// GetCertificateStatus API endpoint to return certificate status for load balancers
-func (app *Application) GetCertificateStatus(c *gin.Context) {
-	loadBalancers, err := app.getLoadBalancers()
-	if err != nil {
-		app.logger.Error("Failed to get load balancers for certificate status", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get load balancers"})
+	if err := app.UpdateLoadBalancerDB(lb); err != nil {
+		app.logger.Error("Failed to update load balancer deploy status", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
 		return
 	}
 
-	// Collect all domains from all load balancers
-	var allDomains []string
-	domainToLB := make(map[string]string) // map domain to LB primary domain
-	
-	for _, lb := range loadBalancers {
-		primaryDomain := ""
-		if domain, ok := lb["domain"].(string); ok {
-			primaryDomain = domain
-		}
+	// Regenerate and apply entire Caddyfile
+	if err := app.applyCaddyfile(); err != nil {
+		// Rollback database changes on failure
+		lb.Status = StatusConfigured
+		lb.CaddyDeployed = false
+		app.UpdateLoadBalancerDB(lb)
 		
-		// Get domains from the load balancer
-		if domains, ok := lb["domains"].([]string); ok {
-			for _, domain := range domains {
-				allDomains = append(allDomains, domain)
-				domainToLB[domain] = primaryDomain
-			}
-		} else if primaryDomain != "" {
-			allDomains = append(allDomains, primaryDomain)
-			domainToLB[primaryDomain] = primaryDomain
-		}
-	}
-
-	// Get certificate status for all domains
-	certStatus := app.getCertificateStatus(allDomains)
-
-	// Group by load balancer
-	lbCertStatus := make(map[string][]CertificateStatus)
-	for domain, status := range certStatus {
-		if lbDomain := domainToLB[domain]; lbDomain != "" {
-			lbCertStatus[lbDomain] = append(lbCertStatus[lbDomain], status)
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{"certificate_status": lbCertStatus})
-}
-
-// RequestCertificate forces a certificate request/renewal for a domain
-func (app *Application) RequestCertificate(c *gin.Context) {
-	// Check if configuration is managed
-	if getConfigMode() == ConfigModeManaged {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Configuration is managed via environment variables. Certificate operations are disabled."})
+		app.logger.Error("Failed to apply Caddyfile", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deploy to Caddy: " + err.Error()})
 		return
 	}
 
-	domain := c.Param("domain")
-	if domain == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Domain parameter is required"})
-		return
-	}
+	app.logger.Info("Load balancer deployed to Caddy", "name", name, "domains", domains)
 
-	// Trigger certificate acquisition by making a request to the domain through Caddy
-	// This is a simplified approach - in practice, you might want to use Caddy's
-	// certificate management endpoints if they become available
-	
-	// For now, we'll return success and let Caddy handle the certificate automatically
-	// when the next request comes in for that domain
-	app.logger.Info("Certificate request triggered", "domain", domain)
-	
 	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("Certificate request initiated for %s. Caddy will automatically acquire the certificate on the next request.", domain),
-		"domain": domain,
+		"name":           name,
+		"status":         lb.Status,
+		"caddy_deployed": lb.CaddyDeployed,
+		"message":        "Load balancer deployed successfully",
 	})
 }
 
-// HTTPSRedirectSettings represents the HTTPS redirect configuration
-type HTTPSRedirectSettings struct {
-	Enabled bool `json:"enabled"`
-}
-
-// GetHTTPSRedirectSettings returns the current HTTPS redirect configuration
-func (app *Application) GetHTTPSRedirectSettings(c *gin.Context) {
-	// Get current settings from Caddy configuration
-	config, err := app.getCaddyConfig()
-	if err != nil {
-		app.logger.Error("Failed to get Caddy config for HTTPS redirect settings", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get HTTPS redirect settings"})
+// UndeployLoadBalancer removes a load balancer from Caddy but keeps it in database
+func (app *Application) UndeployLoadBalancer(c *gin.Context) {
+	name := c.Param("name")
+	
+	lb, domains, ok := app.getLoadBalancerWithDomains(c, name)
+	if !ok {
 		return
 	}
 
-	// Check the current automatic_https configuration
-	enabled := false
-	if httpApp := asMap(config["apps"]); httpApp != nil {
-		if httpConfig := asMap(httpApp["http"]); httpConfig != nil {
-			if servers := asMap(httpConfig["servers"]); servers != nil {
-				if mainServer := asMap(servers["main"]); mainServer != nil {
-					if autoHTTPS := asMap(mainServer["automatic_https"]); autoHTTPS != nil {
-						if disableRedirects, ok := autoHTTPS["disable_redirects"].(bool); ok {
-							enabled = !disableRedirects
-						}
-					}
-				}
-			}
-		}
-	}
-
-	c.JSON(http.StatusOK, HTTPSRedirectSettings{Enabled: enabled})
-}
-
-// SetHTTPSRedirectSettings updates the HTTPS redirect configuration
-func (app *Application) SetHTTPSRedirectSettings(c *gin.Context) {
-	// Check if configuration is managed
-	if getConfigMode() == ConfigModeManaged {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Configuration is managed via environment variables. HTTPS redirect settings cannot be changed."})
+	// Check if load balancer is currently deployed
+	if !lb.CaddyDeployed {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  "Load balancer is not currently deployed",
+			"status": lb.Status,
+		})
 		return
 	}
 
-	var settings HTTPSRedirectSettings
-	if err := c.ShouldBindJSON(&settings); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+	// Update status in database first
+	lb.Status = StatusConfigured // Keep as configured but not active
+	lb.CaddyDeployed = false
+
+	if err := app.UpdateLoadBalancerDB(lb); err != nil {
+		app.logger.Error("Failed to update load balancer undeploy status", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
 		return
 	}
 
-	// Update the Caddy configuration
-	if err := app.updateHTTPSRedirectSetting(settings.Enabled); err != nil {
-		app.logger.Error("Failed to update HTTPS redirect setting", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update HTTPS redirect setting"})
+	// Regenerate and apply entire Caddyfile (without this load balancer)
+	if err := app.applyCaddyfile(); err != nil {
+		// Rollback database changes on failure
+		lb.Status = StatusActive
+		lb.CaddyDeployed = true
+		app.UpdateLoadBalancerDB(lb)
+		
+		app.logger.Error("Failed to apply Caddyfile", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to undeploy from Caddy: " + err.Error()})
 		return
 	}
 
-	// Save the configuration
-	if err := app.saveConfig(); err != nil {
-		app.logger.Warn("Failed to save config after HTTPS redirect update", "error", err)
-	}
+	app.logger.Info("Load balancer undeployed from Caddy", "name", name, "domains", domains)
 
-	app.logger.Info("HTTPS redirect setting updated", "enabled", settings.Enabled)
 	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("HTTPS redirect %s successfully", map[bool]string{true: "enabled", false: "disabled"}[settings.Enabled]),
-		"enabled": settings.Enabled,
+		"name":           name,
+		"status":         lb.Status,
+		"caddy_deployed": lb.CaddyDeployed,
+		"message":        "Load balancer undeployed successfully",
 	})
 }
 
-// updateHTTPSRedirectSetting updates the automatic_https configuration in Caddy
-func (app *Application) updateHTTPSRedirectSetting(enabled bool) error {
-	// Prepare the automatic_https configuration
-	autoHTTPSConfig := map[string]interface{}{
-		"disable_redirects": !enabled,
+// ToggleLoadBalancerDeployment toggles the deployment status of a load balancer
+func (app *Application) ToggleLoadBalancerDeployment(c *gin.Context) {
+	name := c.Param("name")
+	
+	// Parse request body to get the desired state
+	var toggleRequest struct {
+		Deployed bool `json:"deployed"`
+	}
+	if err := c.ShouldBindJSON(&toggleRequest); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
 	}
 
-	// Update the configuration via Caddy Admin API
-	configJSON, err := json.Marshal(autoHTTPSConfig)
-	if err != nil {
-		return fmt.Errorf("failed to marshal automatic_https config: %w", err)
+	lb, domains, ok := app.getLoadBalancerWithDomains(c, name)
+	if !ok {
+		return
 	}
 
-	_, err = app.callCaddyAPI("POST", "/config/apps/http/servers/main/automatic_https", configJSON)
-	if err != nil {
-		return fmt.Errorf("failed to update automatic_https config: %w", err)
+	// Update deployment status in database first
+	lb.CaddyDeployed = toggleRequest.Deployed
+	if toggleRequest.Deployed {
+		lb.Status = StatusActive
+	} else {
+		lb.Status = StatusConfigured
+	}
+	
+	if err := app.UpdateLoadBalancerDB(lb); err != nil {
+		app.logger.Error("Failed to update load balancer toggle status", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update status"})
+		return
 	}
 
-	return nil
+	// Regenerate and apply entire Caddyfile 
+	if err := app.applyCaddyfile(); err != nil {
+		// Rollback database changes on failure
+		lb.CaddyDeployed = !toggleRequest.Deployed
+		if !toggleRequest.Deployed {
+			lb.Status = StatusActive
+		} else {
+			lb.Status = StatusConfigured
+		}
+		app.UpdateLoadBalancerDB(lb)
+		
+		app.logger.Error("Failed to apply Caddyfile during toggle", "name", name, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update Caddy configuration: " + err.Error()})
+		return
+	}
+
+	actionWord := "deployed to"
+	if !toggleRequest.Deployed {
+		actionWord = "removed from"
+	}
+	
+	app.logger.Info("Load balancer deployment toggled", "name", name, "domains", domains, "deployed", toggleRequest.Deployed)
+	c.JSON(http.StatusOK, gin.H{
+		"name":           name,
+		"deployed":       lb.CaddyDeployed,
+		"status":         lb.Status,
+		"message":        fmt.Sprintf("Load balancer %s Caddy", actionWord),
+	})
 }
+
 
 func (app *Application) HandleLogout(c *gin.Context) {
 	session, err := app.store.Get(c.Request, SessionName)
@@ -1453,62 +1757,70 @@ func (app *Application) GetLogsData(c *gin.Context) {
 }
 
 func (app *Application) ExportConfig(c *gin.Context) {
-	config, err := app.getCaddyConfig()
+	caddyfile, err := app.generateCaddyfile()
 	if err != nil {
-		app.logger.Error("Failed to get Caddy config for export", "error", err)
+		app.logger.Error("Failed to generate Caddyfile for export", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to export configuration"})
 		return
 	}
 
-	// Format JSON for readability
-	configJSON, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		app.logger.Error("Failed to marshal config for export", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to format configuration"})
-		return
-	}
-
-	app.logger.Info("Configuration exported")
-	c.Header("Content-Type", "application/json")
-	c.String(http.StatusOK, string(configJSON))
+	app.logger.Info("Caddyfile configuration exported")
+	c.Header("Content-Type", "text/caddyfile")
+	c.Header("Content-Disposition", "attachment; filename=\"Caddyfile\"")
+	c.String(http.StatusOK, caddyfile)
 }
 
-func (app *Application) ImportConfig(c *gin.Context) {
-	// Check if configuration is managed
-	if getConfigMode() == ConfigModeManaged {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Configuration is managed via environment variables. Import is disabled."})
+
+// GetCaddyStatus checks if Caddy is running and responsive
+func (app *Application) GetCaddyStatus(c *gin.Context) {
+	// Try to get Caddy config to check if it's responsive
+	_, err := app.callCaddyAPI("GET", "/config/", nil)
+	
+	status := gin.H{
+		"running": err == nil,
+		"timestamp": time.Now().Unix(),
+	}
+	
+	if err != nil {
+		status["error"] = "Caddy API not responding"
+		app.logger.Debug("Caddy status check failed", "error", err)
+	}
+	
+	c.JSON(http.StatusOK, status)
+}
+
+// ClearLogs clears the specified log file
+func (app *Application) ClearLogs(c *gin.Context) {
+	logType := c.Query("type")
+	if logType == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Log type required"})
 		return
 	}
-
-	configData := strings.TrimSpace(c.PostForm("config"))
-	if configData == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Configuration data is required"})
+	
+	var logPath string
+	switch logType {
+	case "caddy-access":
+		logPath = "/app/data/logs/caddy/access.log"
+	case "caddy-error":
+		logPath = "/app/data/logs/caddy/error.log"
+	case "app":
+		// For app logs, we can't clear them as they're managed by supervisor
+		c.JSON(http.StatusOK, gin.H{"message": "Application logs are managed by supervisor and cannot be cleared"})
+		return
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid log type"})
 		return
 	}
-
-	// Validate JSON
-	var config map[string]interface{}
-	if err := json.Unmarshal([]byte(configData), &config); err != nil {
-		app.logger.Warn("Invalid JSON in import request", "error", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON configuration"})
+	
+	// Truncate the log file
+	if err := os.Truncate(logPath, 0); err != nil {
+		app.logger.Error("Failed to clear log file", "path", logPath, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clear logs"})
 		return
 	}
-
-	// Load the configuration into Caddy
-	if _, err := app.callCaddyAPI("POST", "/load", []byte(configData)); err != nil {
-		app.logger.Error("Failed to load imported config", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load configuration into Caddy"})
-		return
-	}
-
-	// Save the new configuration
-	if err := app.saveConfig(); err != nil {
-		app.logger.Warn("Failed to save imported config", "error", err)
-		// Don't fail the request, just log the warning
-	}
-
-	app.logger.Info("Configuration imported successfully")
-	c.Redirect(http.StatusSeeOther, "/dashboard")
+	
+	app.logger.Info("Cleared log file", "type", logType, "path", logPath)
+	c.JSON(http.StatusOK, gin.H{"message": "Logs cleared successfully"})
 }
 
 func (app *Application) getApplicationLogs() string {
@@ -1542,13 +1854,13 @@ docker logs --tail 1000 -f <container-name>
 Load Balancers Status:
 %s`,
 		strings.Join(logSources, "\n"),
-		getEnv("MANAGEMENT_PORT", DefaultManagementPort),
+		app.config.ManagementPort,
 		time.Now().Format("2006-01-02 15:04:05"),
 		app.getLoadBalancerStatus())
 }
 
 func (app *Application) getLoadBalancerStatus() string {
-	loadBalancers, err := app.getLoadBalancers()
+	loadBalancers, err := app.GetActiveLoadBalancers()
 	if err != nil {
 		return "- Error retrieving load balancers"
 	}
@@ -1559,8 +1871,9 @@ func (app *Application) getLoadBalancerStatus() string {
 
 	var status []string
 	for _, lb := range loadBalancers {
-		if domain, ok := lb["domain"].(string); ok {
-			status = append(status, fmt.Sprintf("- %s", domain))
+		var domains []string
+		if err := json.Unmarshal([]byte(lb.Domains), &domains); err == nil && len(domains) > 0 {
+			status = append(status, fmt.Sprintf("- %s", domains[0]))
 		}
 	}
 	return strings.Join(status, "\n")
@@ -1621,6 +1934,96 @@ func (app *Application) getTailLogs(filename string, lines int) (string, error) 
 		parts = parts[len(parts)-lines:]
 	}
 	return strings.Join(parts, "\n"), nil
+}
+
+// ensureWildcardCertificate ensures a wildcard self-signed certificate exists for HTTPS mode
+func (app *Application) ensureWildcardCertificate() error {
+	certDir := "/app/data/certs"
+	certPath := filepath.Join(certDir, "wildcard.crt")
+	keyPath := filepath.Join(certDir, "wildcard.key")
+
+	// Create certificates directory if it doesn't exist
+	if err := os.MkdirAll(certDir, 0755); err != nil {
+		return fmt.Errorf("failed to create cert directory: %w", err)
+	}
+
+	// Check if certificate already exists
+	if _, err := os.Stat(certPath); err == nil {
+		if _, err := os.Stat(keyPath); err == nil {
+			app.logger.Info("Wildcard certificate already exists", "path", certPath)
+			return nil
+		}
+	}
+
+	// Generate new wildcard certificate
+	app.logger.Info("Generating new wildcard self-signed certificate for HTTPS mode")
+	if err := generateWildcardCert(certPath, keyPath); err != nil {
+		return fmt.Errorf("failed to generate wildcard certificate: %w", err)
+	}
+
+	app.logger.Info("Wildcard certificate generated successfully", "cert", certPath)
+	return nil
+}
+
+// generateWildcardCert generates a wildcard self-signed certificate for all load balancer domains
+func generateWildcardCert(certPath, keyPath string) error {
+	// Generate RSA private key
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate private key: %w", err)
+	}
+
+	// Create certificate template for wildcard certificate
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"SimpleLB Wildcard Certificate"},
+			Country:      []string{"US"},
+			CommonName:   "*.local",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour), // Valid for 10 years
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		DNSNames:              []string{"*", "localhost", "*.localhost", "*.local", "*.test", "*.dev", "*.example.com", "*.app", "*.io", "*.com", "*.net", "*.org"},
+		BasicConstraintsValid: true,
+	}
+
+	// Create certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	// Write certificate to file
+	certOut, err := os.Create(certPath)
+	if err != nil {
+		return fmt.Errorf("failed to create cert file: %w", err)
+	}
+	defer certOut.Close()
+
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		return fmt.Errorf("failed to encode certificate: %w", err)
+	}
+
+	// Write private key to file
+	keyOut, err := os.Create(keyPath)
+	if err != nil {
+		return fmt.Errorf("failed to create key file: %w", err)
+	}
+	defer keyOut.Close()
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return fmt.Errorf("failed to marshal private key: %w", err)
+	}
+
+	if err := pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: privBytes}); err != nil {
+		return fmt.Errorf("failed to encode private key: %w", err)
+	}
+
+	return nil
 }
 
 // generateSelfSignedCert generates a self-signed certificate for the management interface
@@ -1734,6 +2137,142 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+// marshalStringSlice marshals a string slice to JSON, ignoring errors
+func marshalStringSlice(slice []string) string {
+	if data, err := json.Marshal(slice); err == nil {
+		return string(data)
+	}
+	return "[]"
+}
+
+// generateCaddyfile creates a Caddyfile from deployed load balancers
+func (app *Application) generateCaddyfile() (string, error) {
+	// Get all deployed load balancers from database
+	loadBalancers, err := app.GetActiveLoadBalancers()
+	if err != nil {
+		return "", fmt.Errorf("failed to get active load balancers: %w", err)
+	}
+
+	var caddyfile strings.Builder
+	
+	// Only add global config comment if there are no load balancers
+	if len(loadBalancers) == 0 {
+		caddyfile.WriteString("# No load balancers configured\n")
+		return caddyfile.String(), nil
+	}
+
+	// Add each load balancer as a site block
+	for _, lb := range loadBalancers {
+		var domains []string
+		var backends []string
+		
+		if err := json.Unmarshal([]byte(lb.Domains), &domains); err != nil {
+			app.logger.Warn("Failed to parse domains for load balancer", "name", lb.Name, "error", err)
+			continue
+		}
+		
+		if err := json.Unmarshal([]byte(lb.Backends), &backends); err != nil {
+			app.logger.Warn("Failed to parse backends for load balancer", "name", lb.Name, "error", err)
+			continue
+		}
+
+		// Write domain block
+		caddyfile.WriteString(strings.Join(domains, " "))
+		caddyfile.WriteString(" {\n")
+		
+		// Always use internal TLS for HTTPS connections
+		caddyfile.WriteString("\ttls internal\n")
+		
+		// Add reverse proxy directive
+		caddyfile.WriteString("\treverse_proxy")
+		
+		// Add load balancing policy if not default
+		if lb.Method != "" && lb.Method != "random" {
+			switch lb.Method {
+			case "round_robin":
+				caddyfile.WriteString(" {\n\t\tlb_policy round_robin\n")
+			case "least_conn":
+				caddyfile.WriteString(" {\n\t\tlb_policy least_conn\n")
+			case "first":
+				caddyfile.WriteString(" {\n\t\tlb_policy first\n")
+			case "ip_hash":
+				caddyfile.WriteString(" {\n\t\tlb_policy ip_hash\n")
+			case "header":
+				if lb.HashKey != "" {
+					caddyfile.WriteString(fmt.Sprintf(" {\n\t\tlb_policy header %s\n", lb.HashKey))
+				}
+			case "cookie":
+				if lb.HashKey != "" {
+					caddyfile.WriteString(fmt.Sprintf(" {\n\t\tlb_policy cookie %s\n", lb.HashKey))
+				}
+			}
+			
+			// Add backends with closing brace
+			for _, backend := range backends {
+				backend = strings.TrimSpace(backend)
+				// Add https:// scheme for port 443 backends
+				if strings.HasSuffix(backend, ":443") {
+					backend = "https://" + backend
+				}
+				caddyfile.WriteString(fmt.Sprintf("\t\tto %s\n", backend))
+			}
+			caddyfile.WriteString("\t}\n")
+		} else {
+			// Simple case - just list backends
+			for _, backend := range backends {
+				backend = strings.TrimSpace(backend)
+				// Add https:// scheme for port 443 backends
+				if strings.HasSuffix(backend, ":443") {
+					backend = "https://" + backend
+				}
+				caddyfile.WriteString(fmt.Sprintf(" %s", backend))
+			}
+			caddyfile.WriteString("\n")
+		}
+		
+		caddyfile.WriteString("}\n\n")
+	}
+
+	return caddyfile.String(), nil
+}
+
+// applyCaddyfile writes the Caddyfile to Caddy using the load endpoint
+func (app *Application) applyCaddyfile() error {
+	caddyfile, err := app.generateCaddyfile()
+	if err != nil {
+		return fmt.Errorf("failed to generate Caddyfile: %w", err)
+	}
+
+	app.logger.Info("Generated Caddyfile", "content", caddyfile)
+
+	// Send Caddyfile directly to Caddy using Content-Type: text/caddyfile
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	baseURL := app.config.CaddyAdminURL
+	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(baseURL, "/")+"/load", strings.NewReader(caddyfile))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	req.Header.Set("Content-Type", "text/caddyfile")
+
+	resp, err := app.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request to Caddy: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Caddy API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	app.logger.Info("Successfully applied Caddyfile to Caddy")
+	return nil
+}
+
+
 // parseInt parses an integer from string with fallback to default
 func parseInt(s string, defaultValue int) int {
 	if parsed := 0; len(s) > 0 {
@@ -1813,6 +2352,11 @@ func main() {
 				}
 			} else {
 				app.logger.Info("Caddy configuration initialized successfully on startup", "attempt", i+1)
+				
+				// Restore deployed load balancers from database
+				if err := app.restoreDeployedLoadBalancers(); err != nil {
+					app.logger.Warn("Failed to restore deployed load balancers", "error", err)
+				}
 				break
 			}
 		}
@@ -1839,20 +2383,20 @@ func main() {
 	r.POST("/login", app.RateLimitMiddleware(), app.HandleLogin)
 	r.GET("/dashboard", app.RateLimitMiddleware(), app.AuthRequired(), app.ShowDashboard)
 	r.POST("/add", app.RateLimitMiddleware(), app.AuthRequired(), app.AddLoadBalancer)
-	r.GET("/edit/:domain", app.RateLimitMiddleware(), app.AuthRequired(), app.GetLoadBalancer)
-	r.POST("/edit/:domain", app.RateLimitMiddleware(), app.AuthRequired(), app.UpdateLoadBalancer)
-	r.POST("/delete/:domain", app.RateLimitMiddleware(), app.AuthRequired(), app.DeleteLoadBalancer)
+	r.GET("/edit/:name", app.RateLimitMiddleware(), app.AuthRequired(), app.GetLoadBalancer)
+	r.POST("/edit/:name", app.RateLimitMiddleware(), app.AuthRequired(), app.UpdateLoadBalancer)
+	r.POST("/delete/:name", app.RateLimitMiddleware(), app.AuthRequired(), app.DeleteLoadBalancer)
 	r.GET("/export", app.RateLimitMiddleware(), app.AuthRequired(), app.ExportConfig)
-	r.POST("/import", app.RateLimitMiddleware(), app.AuthRequired(), app.ImportConfig)
 	r.GET("/api/logs", app.RateLimitMiddleware(), app.AuthRequired(), app.GetLogsData)
-	r.GET("/api/certificates", app.RateLimitMiddleware(), app.AuthRequired(), app.GetCertificateStatus)
-	r.POST("/api/certificates/:domain/request", app.RateLimitMiddleware(), app.AuthRequired(), app.RequestCertificate)
-	r.GET("/api/https-redirect", app.RateLimitMiddleware(), app.AuthRequired(), app.GetHTTPSRedirectSettings)
-	r.POST("/api/https-redirect", app.RateLimitMiddleware(), app.AuthRequired(), app.SetHTTPSRedirectSettings)
+	r.DELETE("/api/logs", app.RateLimitMiddleware(), app.AuthRequired(), app.ClearLogs)
+	r.GET("/api/caddy/status", app.AuthRequired(), app.GetCaddyStatus) // No rate limit for status checks
+	r.POST("/api/loadbalancers/:name/deploy", app.RateLimitMiddleware(), app.AuthRequired(), app.DeployLoadBalancer)
+	r.POST("/api/loadbalancers/:name/undeploy", app.RateLimitMiddleware(), app.AuthRequired(), app.UndeployLoadBalancer)
+	r.POST("/api/loadbalancers/:name/toggle-deployment", app.RateLimitMiddleware(), app.AuthRequired(), app.ToggleLoadBalancerDeployment)
 	r.GET("/logout", app.RateLimitMiddleware(), app.HandleLogout)
 
 	// Get port
-	port := getEnv("MANAGEMENT_PORT", DefaultManagementPort)
+	port := app.config.ManagementPort
 
 	// Setup TLS certificates for management interface
 	certPath, keyPath, err := app.setupTLS()

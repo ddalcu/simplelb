@@ -1,8 +1,7 @@
 {
 	admin localhost:2019
 	storage file_system /app/data/caddy/data
-	auto_https disable_redirects
 }
 
 # Default empty configuration
-# Load balancers will be configured via admin API
+# All configuration will be managed via admin API

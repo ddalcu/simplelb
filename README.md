@@ -20,8 +20,6 @@ services:
       # Authentication
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=your-secure-password
-      - ACME_EMAIL=your-email@example.com
-      - HTTPS_REDIRECT=true
       
       # Configuration Management (optional)
       - CONFIG_MODE=initial  # "initial" or "managed"
@@ -47,8 +45,6 @@ services:
     environment:
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=your-secure-password
-      - ACME_EMAIL=your-email@example.com
-      - HTTPS_REDIRECT=true
     volumes:
       - ./data:/app/data
     restart: unless-stopped
@@ -61,8 +57,6 @@ docker run -d --name simplelb \
   -v $(pwd)/data:/app/data \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD=demo123 \
-  -e ACME_EMAIL=demo@example.com \
-  -e HTTPS_REDIRECT=true \
   ghcr.io/ddalcu/simplelb:latest
 ```
 
@@ -74,8 +68,6 @@ docker build -t simplelb . && docker run -d --name simplelb \
   -v $(pwd)/data:/app/data \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD=demo123 \
-  -e ACME_EMAIL=demo@example.com \
-  -e HTTPS_REDIRECT=true \
   simplelb
 ```
 
@@ -123,18 +115,20 @@ environment:
 - Real-time configuration updates via Caddy's admin API
 - Persistent configuration across restarts
 - Multi-domain support per load balancer
+- Dual port operation: HTTP (80) and HTTPS (443) work independently
 
 ### 🔒 **Automatic HTTPS**
 - Let's Encrypt integration with automatic certificate provisioning
 - Background certificate renewal
-- HTTP → HTTPS redirects
+- Dual port operation (HTTP and HTTPS work independently)
 - Multi-domain support
 
 ### 🖥️ **Web Interface**
 - Clean, responsive dashboard
 - Easy load balancer management
-- Real-time log viewing
-- Configuration export/import
+- Real-time log viewing with clear functionality
+- Configuration export (view-only)
+- Caddy status indicator with 2-second refresh
 - No CLI required
 
 ### ⚙️ **Configuration Management**
@@ -206,7 +200,7 @@ Simple format - one server per line:
 
 For automatic HTTPS:
 1. **Domain DNS**: Point your domain to this server's IP
-2. **Email Required**: Set `ACME_EMAIL` for Let's Encrypt notifications
+2. **Self-Signed Certificates**: SimpleLB uses self-signed certificates for HTTPS
 3. **Port 443**: Make sure port 443 is accessible from the internet
 4. **Wait**: Certificates are provisioned automatically
 
@@ -222,8 +216,6 @@ For automatic HTTPS:
 | `MANAGEMENT_PORT` | `81` | Web interface port |
 | `SESSION_SECRET` | *auto-generated* | Session encryption key |
 | `SESSION_COOKIE_SECURE` | `0` | Set to `1` for HTTPS cookies |
-| `ACME_EMAIL` | `admin@example.com` | Let's Encrypt email |
-| `HTTPS_REDIRECT` | `false` | Enable automatic HTTP to HTTPS redirects |
 | `CADDY_ADMIN_URL` | `http://127.0.0.1:2019` | Caddy Admin API URL |
 | `GENERAL_RATE_LIMIT` | `60` | Requests per minute per IP |
 
@@ -256,8 +248,6 @@ environment:
 ```yaml
 environment:
   - CONFIG_MODE=managed  # UI becomes read-only
-  - HTTPS_REDIRECT=true  # Enable automatic redirects
-  - ACME_EMAIL=admin@company.com
   - LB_DOMAINS_api=api.company.com
   - LB_BACKENDS_api=10.0.1.100:8080,10.0.1.101:8080
   - LB_METHOD_api=least_conn
@@ -491,8 +481,14 @@ For `header` and `cookie` methods:
 
 ### Web Interface Logs
 - **Application Logs**: View SimpleLB application logs
-- **Caddy Access Logs**: See incoming HTTP requests
+- **Caddy Access Logs**: Detailed JSON logs with:
+  - Client IP address
+  - User agent/browser information
+  - Full request URL (host + path)
+  - Response status and size
+  - Request duration
 - **Caddy Error Logs**: Troubleshoot Caddy issues
+- **Clear Logs**: One-click log clearing from dashboard
 
 ### Command Line
 ```bash
@@ -543,7 +539,7 @@ docker-compose logs -f
 **SSL Certificates not working?**
 - Check DNS points to your server
 - Verify port 443 is accessible
-- Check `ACME_EMAIL` is set
+- Check environment variables are set correctly
 - Look at Caddy error logs
 
 **Load balancer not responding?**
