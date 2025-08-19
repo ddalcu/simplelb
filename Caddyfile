@@ -1,5 +1,5 @@
 {
-	admin localhost:2019
+	admin 127.0.0.1:2019
 	storage file_system /app/data/caddy/data
 }
 

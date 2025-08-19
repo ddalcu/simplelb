@@ -781,9 +781,9 @@ func (app *Application) initializeFreshCaddyConfig() error {
 		return fmt.Errorf("failed to ensure wildcard certificate: %w", err)
 	}
 
-	// Configure server to listen on both ports
+	// Configure server to listen on both ports (IPv4 only)
 	serverConfig := map[string]interface{}{
-		"listen": []string{":80", ":443"},
+		"listen": []string{"0.0.0.0:80", "0.0.0.0:443"},
 		"routes": []interface{}{},
 		"automatic_https": map[string]interface{}{
 			"disable_redirects": true,  // Don't automatically redirect HTTP to HTTPS
@@ -2417,7 +2417,7 @@ func main() {
 
 	// Start server with graceful shutdown
 	srv := &http.Server{
-		Addr:         ":" + port,
+		Addr:         "0.0.0.0:" + port,
 		Handler:      r,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
